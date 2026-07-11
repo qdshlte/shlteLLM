@@ -1,0 +1,29 @@
+# Rust
+target/
+Cargo.lock
+
+# Output
+output/
+data/
+cache/
+logs/
+presets/
+benchmark_output/
+*.gguf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env.local
+
+# Qwen
+.qwen/
