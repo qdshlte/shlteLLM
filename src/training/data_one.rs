@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! ============================================================================
 //! 数据加载与预处理模块（第一部分）
 //! ============================================================================
@@ -924,9 +923,7 @@ impl ParquetTextExtractor {
     pub fn get_text_column_indices(&self, schema: &arrow::datatypes::Schema) -> Vec<usize> {
         let mut indices = Vec::new();
         for (idx, field) in schema.fields().iter().enumerate() {
-            if self.is_text_column(field.name()) {
-                indices.push(idx);
-            } else if self.can_extract_from_type(field.data_type()) {
+            if self.is_text_column(field.name()) || self.can_extract_from_type(field.data_type()) {
                 indices.push(idx);
             }
         }

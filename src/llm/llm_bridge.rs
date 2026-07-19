@@ -23,6 +23,15 @@ use std::collections::HashMap;
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 // ============================================================================
+// 类型别名
+// ============================================================================
+
+/// 文本生成流式回调
+type StreamCallback = Arc<dyn Fn(&str) + Send + Sync>;
+/// Logits 回调
+type LogitsCallback<'a> = &'a mut dyn FnMut(&[f32]);
+
+// ============================================================================
 // 批处理相关结构
 // ============================================================================
 
@@ -35,7 +44,7 @@ pub struct BatchRequest {
     pub temperature: f32,
     pub top_p: f32,
     pub repeat_penalty: f32,
-    pub callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub callback: Option<StreamCallback>,
 }
 
 impl std::fmt::Debug for BatchRequest {
@@ -197,9 +206,9 @@ impl BatchScheduler {
                 let start = std::time::Instant::now();
                 let mut ctx_guard = ctx.lock().unwrap();
                 
-                let response = Self::process_single_request(&mut *ctx_guard, &req, start);
+                let response = Self::process_single_request(&mut ctx_guard, &req, start);
                 
-                if let Some(_) = &req.callback {
+                if req.callback.is_some() {
                     // 回调已经在 process_single_request 中处理
                 }
                 
@@ -253,7 +262,7 @@ impl BatchScheduler {
             
             if !batch.is_empty() {
                 let mut ctx_guard = ctx.lock().unwrap();
-                let responses = Self::process_batch(&mut *ctx_guard, batch);
+                let responses = Self::process_batch(&mut ctx_guard, batch);
                 
                 for response in responses {
                     response_queue.lock().unwrap().push_back(response);
@@ -596,42 +605,41 @@ unsafe impl Sync for LlamaContext {}
 impl LlamaContext {
     /// 从 GGUF 文件加载模型
     pub fn new(model_path: &Path, n_ctx: u32, n_threads: i32) -> Result<Self, String> {
-        unsafe {
-            static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !INITIALIZED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                llama_backend_init(false);
-            }
-
-            let model_params = llama_model_default_params();
-            let model_path_c = CString::new(model_path.to_str().ok_or("Invalid model path")?).map_err(|e| e.to_string())?;
-            let model = llama_load_model_from_file(model_path_c.as_ptr(), model_params);
-            if model.is_null() {
-                return Err("Failed to load model".to_string());
-            }
-
-            let vocab = llama_model_get_vocab(model);
-            
-            let mut ctx_params = llama_context_default_params();
-            ctx_params.n_ctx = n_ctx;
-            ctx_params.n_threads = n_threads;
-            ctx_params.n_threads_batch = n_threads;
-            
-            let ctx = llama_new_context_with_model(model, ctx_params);
-            if ctx.is_null() {
-                llama_free_model(model);
-                return Err("Failed to create context".to_string());
-            }
-
-            Ok(LlamaContext {
-                ctx,
-                model,
-                vocab,
-                n_ctx,
-                n_threads,
-                is_initialized: true,
-                batch_scheduler: None,
-            })
+        static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !INITIALIZED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            llama_backend_init(false);
         }
+
+        let model_params = llama_model_default_params();
+        let model_path_str = model_path.to_string_lossy();
+        let model_path_c = CString::new(model_path_str.as_ref()).map_err(|e| e.to_string())?;
+        let model = llama_load_model_from_file(model_path_c.as_ptr(), model_params);
+        if model.is_null() {
+            return Err("Failed to load model".to_string());
+        }
+
+        let vocab = llama_model_get_vocab(model);
+
+        let mut ctx_params = llama_context_default_params();
+        ctx_params.n_ctx = n_ctx;
+        ctx_params.n_threads = n_threads;
+        ctx_params.n_threads_batch = n_threads;
+
+        let ctx = llama_new_context_with_model(model, ctx_params);
+        if ctx.is_null() {
+            llama_free_model(model);
+            return Err("Failed to create context".to_string());
+        }
+
+        Ok(LlamaContext {
+            ctx,
+            model,
+            vocab,
+            n_ctx,
+            n_threads,
+            is_initialized: true,
+            batch_scheduler: None,
+        })
     }
     
     /// 启用批处理调度器
@@ -659,45 +667,43 @@ impl LlamaContext {
     
     /// 获取词表大小
     pub fn vocab_size(&self) -> i32 {
-        unsafe { llama_vocab_n_tokens(self.vocab) }
+        llama_vocab_n_tokens(self.vocab)
     }
-    
+
     /// 获取 EOS token ID
     pub fn eos_token(&self) -> i32 {
-        unsafe { llama_token_eos(self.vocab) }
+        llama_token_eos(self.vocab)
     }
-    
+
     /// 获取 BOS token ID
     pub fn bos_token(&self) -> i32 {
-        unsafe { llama_token_bos(self.vocab) }
+        llama_token_bos(self.vocab)
     }
     
     /// 将文本编码为 token 序列
     pub fn tokenize(&self, text: &str, add_bos: bool, add_eos: bool) -> Vec<i32> {
-        unsafe {
-            let text_c = match CString::new(text) {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
-            };
-            let n_tokens_max = text.len() + 3;
-            let mut tokens = vec![0i32; n_tokens_max];
-            
-            let n_tokens = llama_tokenize(
-                self.vocab,
-                text_c.as_ptr(),
-                text.len(),
-                tokens.as_mut_ptr(),
-                n_tokens_max as i32,
-                add_bos,
-                add_eos,
-            );
-            
-            if n_tokens > 0 {
-                tokens.truncate(n_tokens as usize);
-                tokens
-            } else {
-                Vec::new()
-            }
+        let text_c = match CString::new(text) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let n_tokens_max = text.len() + 3;
+        let mut tokens = vec![0i32; n_tokens_max];
+
+        let n_tokens = llama_tokenize(
+            self.vocab,
+            text_c.as_ptr(),
+            text.len(),
+            tokens.as_mut_ptr(),
+            n_tokens_max as i32,
+            add_bos,
+            add_eos,
+        );
+
+        if n_tokens > 0 {
+            tokens.truncate(n_tokens as usize);
+            tokens
+        } else {
+            Vec::new()
         }
     }
     
@@ -744,7 +750,7 @@ impl LlamaContext {
         &mut self, 
         tokens: &[i32], 
         n_past: i32,
-        logits_callback: Option<&mut dyn FnMut(&[f32])>,
+        logits_callback: Option<LogitsCallback<'_>>,
     ) -> Result<i32, String> {
         let n_tokens = tokens.len() as i32;
         if n_tokens == 0 {
@@ -854,7 +860,7 @@ impl LlamaContext {
             let n_past = self.eval_tokens_safe(&input_tokens, 0)?;
             
             let mut generated_tokens = Vec::with_capacity(max_tokens);
-            let mut n_past_current = n_past as i32;
+            let mut n_past_current = n_past;
             let n_ctx = self.n_ctx as i32;
             let eos_token = self.eos_token();
             
@@ -980,15 +986,13 @@ impl LlamaContext {
     
     /// 获取模型信息
     pub fn get_model_info(&self) -> ModelInfo {
-        unsafe {
-            ModelInfo {
-                n_vocab: llama_vocab_n_tokens(self.vocab) as usize,
-                n_ctx: self.n_ctx as usize,
-                n_embd: llama_n_embd(self.model) as usize,
-                n_layer: llama_n_layer(self.model) as usize,
-                n_head: llama_n_head(self.model) as usize,
-                n_head_kv: llama_n_head(self.model) as usize,
-            }
+        ModelInfo {
+            n_vocab: llama_vocab_n_tokens(self.vocab) as usize,
+            n_ctx: self.n_ctx as usize,
+            n_embd: llama_n_embd(self.model) as usize,
+            n_layer: llama_n_layer(self.model) as usize,
+            n_head: llama_n_head(self.model) as usize,
+            n_head_kv: llama_n_head(self.model) as usize,
         }
     }
     
@@ -1004,16 +1008,12 @@ impl LlamaContext {
     
     /// 清空 KV 缓存
     pub fn clear_cache(&mut self) {
-        unsafe {
-            llama_kv_cache_clear(self.ctx);
-        }
+        llama_kv_cache_clear(self.ctx);
     }
-    
+
     /// 重置上下文状态
     pub fn reset(&mut self) {
-        unsafe {
-            llama_kv_cache_clear(self.ctx);
-        }
+        llama_kv_cache_clear(self.ctx);
     }
 }
 
@@ -1040,15 +1040,13 @@ impl std::fmt::Display for ModelInfo {
 
 impl Drop for LlamaContext {
     fn drop(&mut self) {
-        unsafe {
-            if !self.ctx.is_null() {
-                llama_free(self.ctx);
-                self.ctx = std::ptr::null_mut();
-            }
-            if !self.model.is_null() {
-                llama_free_model(self.model);
-                self.model = std::ptr::null_mut();
-            }
+        if !self.ctx.is_null() {
+            llama_free(self.ctx);
+            self.ctx = std::ptr::null_mut();
+        }
+        if !self.model.is_null() {
+            llama_free_model(self.model);
+            self.model = std::ptr::null_mut();
         }
     }
 }
@@ -1061,17 +1059,13 @@ static BACKEND_REF_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 
 pub fn init_backend() {
     if BACKEND_REF_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-        unsafe {
-            llama_backend_init(false);
-        }
+        llama_backend_init(false);
     }
 }
 
 pub fn free_backend() {
     if BACKEND_REF_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-        unsafe {
-            llama_backend_free();
-        }
+        llama_backend_free();
     }
 }
 

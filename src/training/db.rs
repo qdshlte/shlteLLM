@@ -109,24 +109,19 @@ impl PooledConnection {
     }
     
     fn is_expired(&self, config: &ConnectionPoolConfig) -> bool {
-        if config.max_lifetime > 0 {
-            if self.created_at.elapsed() > Duration::from_secs(config.max_lifetime) {
+        if config.max_lifetime > 0
+            && self.created_at.elapsed() > Duration::from_secs(config.max_lifetime) {
                 return true;
             }
-        }
-        if config.idle_timeout > 0 {
-            if self.last_used_at.elapsed() > Duration::from_secs(config.idle_timeout) {
+        if config.idle_timeout > 0
+            && self.last_used_at.elapsed() > Duration::from_secs(config.idle_timeout) {
                 return true;
             }
-        }
         false
     }
     
     fn health_check(&mut self) -> bool {
-        match self.conn.execute("SELECT 1", []) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        self.conn.execute("SELECT 1", []).is_ok()
     }
 }
 
@@ -196,7 +191,7 @@ impl ConnectionPool {
         let timeout = Duration::from_secs(self.config.connection_timeout);
         
         // 定期清理过期连接
-        if self.stats.load(std::sync::atomic::Ordering::Relaxed) % 100 == 0 {
+        if self.stats.load(std::sync::atomic::Ordering::Relaxed).is_multiple_of(100) {
             self.cleanup_expired_connections();
         }
         
@@ -672,25 +667,25 @@ impl Database {
         })
     }
 
-    pub fn get_all_datasets(&self) -> Result<Vec<(i64, String, String, String, f64)>> {
+    pub fn get_all_datasets(&self) -> Result<Vec<DatasetRecord>> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, source, download_status, COALESCE(download_progress, 0.0) 
+                "SELECT id, name, source, download_status, COALESCE(download_progress, 0.0)
                  FROM datasets ORDER BY id DESC",
             )?;
-            
+
             let datasets = stmt
                 .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, f64>(4)?,
-                    ))
+                    Ok(DatasetRecord {
+                        id: row.get::<_, i64>(0)?,
+                        name: row.get::<_, String>(1)?,
+                        source: row.get::<_, String>(2)?,
+                        download_status: row.get::<_, String>(3)?,
+                        download_progress: row.get::<_, f64>(4)?,
+                    })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            
+
             Ok(datasets)
         })
     }
@@ -885,25 +880,25 @@ impl Database {
         })
     }
 
-    pub fn get_checkpoints(&self, run_id: i64) -> Result<Vec<(usize, f64, f64, String, bool)>> {
+    pub fn get_checkpoints(&self, run_id: i64) -> Result<Vec<CheckpointRecord>> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT step, loss, COALESCE(eval_loss, 0.0), path, is_best 
+                "SELECT step, loss, COALESCE(eval_loss, 0.0), path, is_best
                  FROM checkpoints WHERE run_id = ?1 ORDER BY step",
             )?;
-            
+
             let checkpoints = stmt
                 .query_map(params![run_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as usize,
-                        row.get::<_, f64>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i32>(4)? != 0,
-                    ))
+                    Ok(CheckpointRecord {
+                        step: row.get::<_, i64>(0)? as usize,
+                        loss: row.get::<_, f64>(1)?,
+                        eval_loss: row.get::<_, f64>(2)?,
+                        path: row.get::<_, String>(3)?,
+                        is_best: row.get::<_, i32>(4)? != 0,
+                    })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            
+
             Ok(checkpoints)
         })
     }
@@ -1207,56 +1202,56 @@ impl Database {
     // 查询操作
     // ========================================================================
 
-    pub fn get_training_runs(&self) -> Result<Vec<(i64, String, String, f64, usize)>> {
+    pub fn get_training_runs(&self) -> Result<Vec<TrainingRunRecord>> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, status, start_time, COALESCE(best_loss, 0.0), current_step 
+                "SELECT id, status, start_time, COALESCE(best_loss, 0.0), current_step
                  FROM training_runs ORDER BY start_time DESC LIMIT 10",
             )?;
-            
+
             let runs = stmt
                 .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, f64>(3)?,
-                        row.get::<_, i64>(4)? as usize,
-                    ))
+                    Ok(TrainingRunRecord {
+                        id: row.get::<_, i64>(0)?,
+                        status: row.get::<_, String>(1)?,
+                        start_time: row.get::<_, String>(2)?,
+                        best_loss: row.get::<_, f64>(3)?,
+                        current_step: row.get::<_, i64>(4)? as usize,
+                    })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            
+
             Ok(runs)
         })
     }
 
     pub fn get_training_runs_full(
         &self,
-    ) -> Result<Vec<(i64, String, String, String, f64, f64, usize, usize, Option<String>)>> {
+    ) -> Result<Vec<TrainingRunFullRecord>> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, status, start_time, COALESCE(end_time, ''), 
-                        COALESCE(best_loss, 0.0), COALESCE(final_loss, 0.0), 
+                "SELECT id, status, start_time, COALESCE(end_time, ''),
+                        COALESCE(best_loss, 0.0), COALESCE(final_loss, 0.0),
                         current_step, total_steps, device_info
                  FROM training_runs ORDER BY start_time DESC LIMIT 20",
             )?;
-            
+
             let runs = stmt
                 .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, f64>(5)?,
-                        row.get::<_, i64>(6)? as usize,
-                        row.get::<_, i64>(7)? as usize,
-                        row.get::<_, Option<String>>(8)?,
-                    ))
+                    Ok(TrainingRunFullRecord {
+                        id: row.get::<_, i64>(0)?,
+                        status: row.get::<_, String>(1)?,
+                        start_time: row.get::<_, String>(2)?,
+                        end_time: row.get::<_, String>(3)?,
+                        best_loss: row.get::<_, f64>(4)?,
+                        final_loss: row.get::<_, f64>(5)?,
+                        current_step: row.get::<_, i64>(6)? as usize,
+                        total_steps: row.get::<_, i64>(7)? as usize,
+                        device_info: row.get::<_, Option<String>>(8)?,
+                    })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            
+
             Ok(runs)
         })
     }
@@ -1286,27 +1281,27 @@ impl Database {
     pub fn get_metrics_for_run_full(
         &self,
         run_id: i64,
-    ) -> Result<Vec<(usize, f64, f64, f64, f64, f64)>> {
+    ) -> Result<Vec<MetricRecord>> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT step, loss, COALESCE(eval_loss, 0.0), learning_rate, 
+                "SELECT step, loss, COALESCE(eval_loss, 0.0), learning_rate,
                         COALESCE(gradient_norm, 0.0), COALESCE(tokens_per_second, 0.0)
                  FROM metrics WHERE run_id = ?1 ORDER BY step",
             )?;
-            
+
             let metrics = stmt
                 .query_map(params![run_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as usize,
-                        row.get::<_, f64>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, f64>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, f64>(5)?,
-                    ))
+                    Ok(MetricRecord {
+                        step: row.get::<_, i64>(0)? as usize,
+                        loss: row.get::<_, f64>(1)?,
+                        eval_loss: row.get::<_, f64>(2)?,
+                        learning_rate: row.get::<_, f64>(3)?,
+                        gradient_norm: row.get::<_, f64>(4)?,
+                        tokens_per_second: row.get::<_, f64>(5)?,
+                    })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            
+
             Ok(metrics)
         })
     }
@@ -1490,6 +1485,61 @@ impl Database {
 // ============================================================================
 // 辅助结构
 // ============================================================================
+
+/// 数据集记录
+#[derive(Debug, Clone)]
+pub struct DatasetRecord {
+    pub id: i64,
+    pub name: String,
+    pub source: String,
+    pub download_status: String,
+    pub download_progress: f64,
+}
+
+/// 检查点记录
+#[derive(Debug, Clone)]
+pub struct CheckpointRecord {
+    pub step: usize,
+    pub loss: f64,
+    pub eval_loss: f64,
+    pub path: String,
+    pub is_best: bool,
+}
+
+/// 训练运行记录（摘要）
+#[derive(Debug, Clone)]
+pub struct TrainingRunRecord {
+    pub id: i64,
+    pub status: String,
+    pub start_time: String,
+    pub best_loss: f64,
+    pub current_step: usize,
+}
+
+/// 训练运行记录（完整）
+#[derive(Debug, Clone)]
+pub struct TrainingRunFullRecord {
+    pub id: i64,
+    pub status: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub best_loss: f64,
+    pub final_loss: f64,
+    pub current_step: usize,
+    pub total_steps: usize,
+    pub device_info: Option<String>,
+}
+
+/// 指标记录
+#[derive(Debug, Clone)]
+pub struct MetricRecord {
+    pub step: usize,
+    pub loss: f64,
+    pub eval_loss: f64,
+    pub learning_rate: f64,
+    pub gradient_norm: f64,
+    pub tokens_per_second: f64,
+}
 
 #[derive(Debug, Clone)]
 pub struct TrainingStats {

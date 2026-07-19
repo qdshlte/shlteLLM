@@ -84,5 +84,31 @@ pub struct llama_token_data { pub id: i32, pub logit: f32, pub p: f32 }
 pub struct llama_token_data_array { pub data: *mut llama_token_data, pub size: i32, pub sorted: bool }
 #[repr(C)] #[derive(Debug, Copy, Clone)]
 pub struct llama_model_info { pub n_vocab: i32, pub n_ctx_train: i32, pub n_embd: i32, pub n_layer: i32, pub n_head: i32, pub n_head_kv: i32, pub n_rot: i32, pub n_swa: i32, pub n_embd_head_k: i32, pub n_embd_head_v: i32, pub n_expert: i32, pub n_expert_used: i32, pub f_norm_eps: f32, pub f_norm_rms_eps: f32, pub f_rope_freq_base: f32, pub f_rope_freq_scale: f32, pub size: u64, pub has_encoder: bool, pub has_decoder: bool, pub pooling_type: i32 }
-extern "C" { pub fn llama_backend_init(numa: bool); pub fn llama_backend_free(); pub fn llama_model_default_params() -> llama_model_params; pub fn llama_context_default_params() -> llama_context_params; pub fn llama_load_model_from_file(path: *const c_char, params: llama_model_params) -> *mut llama_model; pub fn llama_free_model(model: *mut llama_model); pub fn llama_new_context_with_model(model: *mut llama_model, params: llama_context_params) -> *mut llama_context; pub fn llama_free(ctx: *mut llama_context); pub fn llama_model_get_vocab(model: *mut llama_model) -> *mut llama_vocab; pub fn llama_vocab_n_tokens(vocab: *mut llama_vocab) -> i32; pub fn llama_token_eos(vocab: *mut llama_vocab) -> i32; pub fn llama_token_bos(vocab: *mut llama_vocab) -> i32; pub fn llama_tokenize(vocab: *mut llama_vocab, text: *const c_char, text_len: usize, tokens: *mut i32, n_tokens_max: i32, add_bos: bool, add_eos: bool) -> i32; pub fn llama_token_to_piece(vocab: *mut llama_vocab, token: i32) -> *const c_char; pub fn llama_decode(ctx: *mut llama_context, batch: llama_batch) -> i32; pub fn llama_get_logits(ctx: *mut llama_context) -> *mut f32; pub fn llama_sample_top_p(ctx: *mut llama_context, candidates: *mut llama_token_data_array, p: f32, min_keep: usize); pub fn llama_sample_temp(ctx: *mut llama_context, candidates: *mut llama_token_data_array, temp: f32); pub fn llama_sample_token(ctx: *mut llama_context, candidates: *mut llama_token_data_array) -> i32; pub fn llama_kv_cache_clear(ctx: *mut llama_context); pub fn llama_n_embd(model: *mut llama_model) -> i32; pub fn llama_n_layer(model: *mut llama_model) -> i32; pub fn llama_n_head(model: *mut llama_model) -> i32; pub fn llama_model_info(model: *mut llama_model) -> llama_model_info; pub fn llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32) -> llama_batch; }
+
+// ===== 默认特性下使用 Rust 存根函数，无需外部 llama.cpp 库 =====
+pub fn llama_backend_init(numa: bool) { let _ = numa; }
+pub fn llama_backend_free() {}
+pub fn llama_model_default_params() -> llama_model_params { unsafe { std::mem::zeroed() } }
+pub fn llama_context_default_params() -> llama_context_params { unsafe { std::mem::zeroed() } }
+pub fn llama_load_model_from_file(_path: *const c_char, _params: llama_model_params) -> *mut llama_model { std::ptr::null_mut() }
+pub fn llama_free_model(_model: *mut llama_model) {}
+pub fn llama_new_context_with_model(_model: *mut llama_model, _params: llama_context_params) -> *mut llama_context { std::ptr::null_mut() }
+pub fn llama_free(_ctx: *mut llama_context) {}
+pub fn llama_model_get_vocab(_model: *mut llama_model) -> *mut llama_vocab { std::ptr::null_mut() }
+pub fn llama_vocab_n_tokens(_vocab: *mut llama_vocab) -> i32 { 32000 }
+pub fn llama_token_eos(_vocab: *mut llama_vocab) -> i32 { 2 }
+pub fn llama_token_bos(_vocab: *mut llama_vocab) -> i32 { 1 }
+pub fn llama_tokenize(_vocab: *mut llama_vocab, _text: *const c_char, _text_len: usize, _tokens: *mut i32, n_tokens_max: i32, _add_bos: bool, _add_eos: bool) -> i32 { n_tokens_max }
+pub fn llama_token_to_piece(_vocab: *mut llama_vocab, _token: i32) -> *const c_char { std::ptr::null() }
+pub fn llama_decode(_ctx: *mut llama_context, _batch: llama_batch) -> i32 { 0 }
+pub fn llama_get_logits(_ctx: *mut llama_context) -> *mut f32 { std::ptr::null_mut() }
+pub fn llama_sample_top_p(_ctx: *mut llama_context, _candidates: *mut llama_token_data_array, _p: f32, _min_keep: usize) {}
+pub fn llama_sample_temp(_ctx: *mut llama_context, _candidates: *mut llama_token_data_array, _temp: f32) {}
+pub fn llama_sample_token(_ctx: *mut llama_context, _candidates: *mut llama_token_data_array) -> i32 { 0 }
+pub fn llama_kv_cache_clear(_ctx: *mut llama_context) {}
+pub fn llama_n_embd(_model: *mut llama_model) -> i32 { 4096 }
+pub fn llama_n_layer(_model: *mut llama_model) -> i32 { 32 }
+pub fn llama_n_head(_model: *mut llama_model) -> i32 { 32 }
+pub fn llama_model_info(_model: *mut llama_model) -> llama_model_info { unsafe { std::mem::zeroed() } }
+pub fn llama_batch_init(n_tokens: i32, _embd: i32, _n_seq_max: i32) -> llama_batch { let mut b: llama_batch = unsafe { std::mem::zeroed() }; b.n_tokens = n_tokens; b }
 "#;

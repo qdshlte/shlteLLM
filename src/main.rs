@@ -241,22 +241,74 @@ enum Commands {
 }
 
 // ============================================================================
+// 终端保护守卫
+// ============================================================================
+
+/// 确保终端在 panic 或异常退出时恢复到正常模式
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> Self {
+        // 设置自定义 panic hook，确保终端恢复
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // 尝试恢复终端
+            let _ = crossterm::terminal::disable_raw_mode();
+            let mut stdout = std::io::stdout();
+            let _ = crossterm::execute!(
+                stdout,
+                crossterm::terminal::LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture
+            );
+            // 调用之前的 hook
+            prev_hook(info);
+        }));
+        TerminalGuard
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // 尝试恢复终端（正常退出时）
+        let _ = crossterm::terminal::disable_raw_mode();
+        let mut stdout = std::io::stdout();
+        let _ = crossterm::execute!(
+            stdout,
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
+    }
+}
+
+// ============================================================================
 // 主函数
 // ============================================================================
 
-fn main() -> Result<()> {
+fn main() {
+    // 初始化 panic hook 和终端守卫，确保终端不会停留在原始模式
+    let _guard = TerminalGuard::new();
+
     let cli = Cli::parse();
 
     // 设置日志级别
     if cli.verbose {
         std::env::set_var("RUST_LOG", "debug");
-        env_logger::init();
     } else {
         std::env::set_var("RUST_LOG", "info");
-        env_logger::init();
     }
+    env_logger::init();
 
-    // 根据子命令执行相应操作
+    // 执行子命令
+    if let Err(e) = run_command(cli) {
+        eprintln!("\n❌ {}", e);
+        if let Some(suggestion) = e.suggestion() {
+            eprintln!("   💡 建议: {}", suggestion);
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run_command(cli: Cli) -> Result<()> {
     match cli.command {
         // ====================================================================
         // 训练命令
@@ -331,7 +383,7 @@ fn main() -> Result<()> {
                 _ => {
                     eprintln!("❌ 不支持的算法: {}", algorithm);
                     println!("   支持的算法: bpe, wordpiece, unigram, sentencepiece");
-                    std::process::exit(1);
+                    return Err(error::TrainError::Config(format!("不支持的算法: {}", algorithm)));
                 }
             };
 
@@ -384,7 +436,7 @@ fn main() -> Result<()> {
 
             if texts.is_empty() {
                 eprintln!("❌ 未找到可用的文本数据");
-                std::process::exit(1);
+                return Err(error::TrainError::Data("未找到可用的文本数据".into()));
             }
 
             println!("   文本数量: {}", texts.len());
@@ -399,11 +451,6 @@ fn main() -> Result<()> {
         // 验证配置命令
         // ====================================================================
         Commands::Validate { config } => {
-            if !config.exists() {
-                eprintln!("❌ 配置文件不存在: {}", config.display());
-                std::process::exit(1);
-            }
-
             let config = Config::from_file(&config)?;
             config.validate()?;
             println!("✅ 配置验证通过");
@@ -569,55 +616,51 @@ fn main() -> Result<()> {
                 if files.is_empty() {
                     eprintln!("❌ 未找到 .gguf 模型文件");
                     eprintln!("   请使用 --model 指定模型路径，或将模型放在当前目录");
-                    std::process::exit(1);
+                    return Err(error::TrainError::Model("未找到 .gguf 模型文件".into()));
                 }
-                
+
                 if files.len() > 1 {
                     println!("📂 找到多个模型文件，使用第一个:");
                     for f in &files {
                         println!("   - {}", f.display());
                     }
                 }
-                
+
                 files[0].clone()
             };
-            
+
             if !model_path.exists() {
                 eprintln!("❌ 模型文件不存在: {}", model_path.display());
-                std::process::exit(1);
+                return Err(error::TrainError::Model(format!(
+                    "模型文件不存在: {}",
+                    model_path.display()
+                )));
             }
-            
+
             // 非交互模式：直接执行提示词
             if let Some(prompt_text) = prompt {
                 println!("🎯 加载模型: {}", model_path.display());
-                
+
                 let mut ctx = match LlamaContext::new(&model_path, context_size as u32, threads as i32) {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("❌ 加载模型失败: {}", e);
-                        std::process::exit(1);
+                        return Err(error::TrainError::Model(format!("加载模型失败: {}", e)));
                     }
                 };
-                
+
                 let info = ctx.get_model_info();
                 println!("📊 模型信息: {} 层, {} 头, 词表 {}", info.n_layer, info.n_head, info.n_vocab);
                 println!("💬 提示词: {}", prompt_text);
                 println!("📝 生成中...\n");
-                
-                let response = match ctx.generate(
+
+                let response = ctx.generate(
                     &prompt_text,
                     max_tokens,
                     temperature,
                     top_p,
                     repeat_penalty,
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("❌ 生成失败: {}", e);
-                        std::process::exit(1);
-                    }
-                };
-                
+                ).map_err(|e| error::TrainError::Model(format!("生成失败: {}", e)))?;
+
                 println!("{}", response);
                 return Ok(());
             }
@@ -632,15 +675,14 @@ fn main() -> Result<()> {
                 eprintln!("❌ 加载模型失败: {}", e);
                 eprintln!("   仍然可以进入仪表板，使用 /load 加载");
             }
-            
+
             // 运行仪表板
             tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(async {
-                    if let Err(e) = dashboard.run().await {
-                        eprintln!("仪表板错误: {}", e);
-                    }
-                });
+                    dashboard.run().await
+                })
+                .map_err(|e| error::TrainError::Io(e))?;
         }
     }
 

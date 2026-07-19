@@ -48,22 +48,19 @@ use std::hash::{Hash, Hasher};
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ModelSerializationFormat {
     /// JSON格式（人类可读，兼容性好，但文件大）
     Json,
     /// MessagePack格式（二进制，紧凑，快速）
     MessagePack,
     /// 压缩的MessagePack（使用zstd压缩）
+    #[default]
     CompressedMessagePack,
     /// 分片格式（将大模型分成多个文件）
     Sharded,
 }
 
-impl Default for ModelSerializationFormat {
-    fn default() -> Self {
-        ModelSerializationFormat::CompressedMessagePack
-    }
-}
 
 impl std::str::FromStr for ModelSerializationFormat {
     type Err = String;
@@ -533,7 +530,7 @@ impl Transformer {
             .collect();
         
         let shard_size_bytes = config.shard_size_bytes as usize;
-        let num_shards = (param_bytes.len() + shard_size_bytes - 1) / shard_size_bytes;
+        let num_shards = param_bytes.len().div_ceil(shard_size_bytes);
         
         let mut shard_infos = Vec::new();
         
@@ -766,11 +763,9 @@ impl Transformer {
 
         let padding_mask: Option<Vec<Vec<bool>>> = if let Some(pad_id) = pad_token_id {
             let mut mask = vec![vec![true; seq_len]; seq_len];
-            for i in 0..seq_len {
-                if input_ids[i] == pad_id {
-                    for j in 0..seq_len {
-                        mask[j][i] = false;
-                    }
+            for (i, &id) in input_ids.iter().enumerate() {
+                if id == pad_id {
+                    mask.iter_mut().for_each(|row| row[i] = false);
                 }
             }
             Some(mask)
@@ -882,9 +877,9 @@ impl Transformer {
             PositionEncoding::Sinusoidal => {
                 for (i, pos) in positions.iter().enumerate() {
                     let pos = *pos as f32;
-                    for j in 0..dim {
+                    for (j, state) in hidden_states[i].iter_mut().enumerate() {
                         let angle = pos / (10000.0f32.powf(2.0 * (j / 2) as f32 / dim as f32));
-                        hidden_states[i][j] += if j % 2 == 0 { angle.sin() } else { angle.cos() };
+                        *state += if j % 2 == 0 { angle.sin() } else { angle.cos() };
                     }
                 }
             }
@@ -934,7 +929,7 @@ impl Transformer {
 
         let final_norm_grad = LayerNormGradients {
             weight: vec![0.0f32; hidden_dim],
-            bias: if matches!(self.params.normalization, NormalizationType::RMSNorm) {
+            bias: if matches!(self.params.normalization, NormalizationType::Rms) {
                 None
             } else {
                 Some(vec![0.0f32; hidden_dim])
@@ -1634,7 +1629,7 @@ impl LayerGradients {
             },
             attention_norm: LayerNormGradients {
                 weight: vec![0.0f32; hidden_dim],
-                bias: if matches!(params.normalization, NormalizationType::RMSNorm) {
+                bias: if matches!(params.normalization, NormalizationType::Rms) {
                     None
                 } else {
                     Some(vec![0.0f32; hidden_dim])
@@ -1642,7 +1637,7 @@ impl LayerGradients {
             },
             ffn_norm: LayerNormGradients {
                 weight: vec![0.0f32; hidden_dim],
-                bias: if matches!(params.normalization, NormalizationType::RMSNorm) {
+                bias: if matches!(params.normalization, NormalizationType::Rms) {
                     None
                 } else {
                     Some(vec![0.0f32; hidden_dim])
@@ -1820,14 +1815,10 @@ impl MultiHeadAttention {
                 num_kv_heads
             );
             
-            let use_causal = match self.attention_type {
-                AttentionType::SlidingWindow { window_size: _ } => false,
-                AttentionType::GQAWithSlidingWindow {
-                    num_groups: _,
-                    window_size: _,
-                } => false,
-                _ => true,
-            };
+            let use_causal = !matches!(self.attention_type,
+                AttentionType::SlidingWindow { .. }
+                | AttentionType::GQAWithSlidingWindow { .. }
+            );
 
             for block_start in (0..seq_len).step_by(block_size) {
                 let block_end = (block_start + block_size).min(seq_len);
@@ -1843,56 +1834,57 @@ impl MultiHeadAttention {
 
                     let mut scores = vec![vec![0.0f32; kv_len]; block_len];
 
-                    for i in 0..block_len {
+                    for (i, scores_row) in scores.iter_mut().enumerate() {
                         let seq_idx = block_start + i;
                         let q_offset = h * head_dim;
 
-                        for j in 0..kv_len {
+                        for (j, score_val) in scores_row.iter_mut().enumerate() {
                             let kv_idx = kv_start + j;
                             let k_offset = kv_head * head_dim;
 
                             let mut score = 0.0f64;
-                            for d in 0..head_dim {
-                                score += q[seq_idx][q_offset + d] as f64
-                                    * k[kv_idx][k_offset + d] as f64;
+                            for (&q_val, &k_val) in q[seq_idx][q_offset..].iter()
+                                .zip(k[kv_idx][k_offset..].iter())
+                                .take(head_dim)
+                            {
+                                score += q_val as f64 * k_val as f64;
                             }
-                            scores[i][j] = (score as f32) * scale;
+                            *score_val = (score as f32) * scale;
                         }
                     }
 
-                    for i in 0..block_len {
+                    for (i, scores_row) in scores.iter_mut().enumerate() {
                         let seq_idx = block_start + i;
-                        for j in 0..kv_len {
+                        for (j, score_val) in scores_row.iter_mut().enumerate() {
                             let kv_idx = kv_start + j;
 
                             if use_causal && kv_idx > seq_idx {
-                                scores[i][j] = f32::NEG_INFINITY;
+                                *score_val = f32::NEG_INFINITY;
                             }
 
                             if let Some(window) = self.sliding_window {
                                 let distance = seq_idx.abs_diff(kv_idx);
                                 if distance > window {
-                                    scores[i][j] = f32::NEG_INFINITY;
+                                    *score_val = f32::NEG_INFINITY;
                                 }
                             }
 
                             if let Some(mask) = attention_mask {
                                 if !mask[seq_idx][kv_idx] {
-                                    scores[i][j] = f32::NEG_INFINITY;
+                                    *score_val = f32::NEG_INFINITY;
                                 }
                             }
                         }
                     }
 
-                    for i in 0..block_len {
-                        for j in 0..kv_len {
-                            let score = scores[i][j];
+                    for (i, scores_row) in scores.iter_mut().enumerate() {
+                        for (j, &score) in scores_row.iter().enumerate() {
                             if score != f32::NEG_INFINITY && !score.is_nan() {
                                 let current_max = max_vals[i];
                                 if score > current_max {
                                     let scale_factor = (current_max - score).exp();
-                                    for d in 0..head_dim {
-                                        block_output[i][d] *= scale_factor;
+                                    for b_val in block_output[i].iter_mut() {
+                                        *b_val *= scale_factor;
                                     }
                                     sum_exp[i] *= scale_factor as f64;
                                     max_vals[i] = score;
@@ -1902,21 +1894,27 @@ impl MultiHeadAttention {
                                 sum_exp[i] += exp_val as f64;
 
                                 let v_offset = kv_head * head_dim;
-                                for d in 0..head_dim {
-                                    block_output[i][d] += exp_val * v[kv_start + j][v_offset + d];
+                                for (b_val, &v_val) in block_output[i].iter_mut()
+                                    .zip(v[kv_start + j][v_offset..].iter())
+                                    .take(head_dim)
+                                {
+                                    *b_val += exp_val * v_val;
                                 }
                             }
                         }
                     }
                 }
 
-                for i in 0..block_len {
+                for (i, bo_row) in block_output.iter().enumerate() {
                     let seq_idx = block_start + i;
                     let q_offset = h * head_dim;
                     if sum_exp[i] > 1e-12 {
                         let inv_sum = 1.0 / sum_exp[i];
-                        for d in 0..head_dim {
-                            output[seq_idx][q_offset + d] = block_output[i][d] * inv_sum as f32;
+                        for (out_val, &b_val) in output[seq_idx][q_offset..].iter_mut()
+                            .zip(bo_row.iter())
+                            .take(head_dim)
+                        {
+                            *out_val = b_val * inv_sum as f32;
                         }
                     }
                 }
@@ -1944,14 +1942,10 @@ impl MultiHeadAttention {
         for h in 0..num_heads {
             let kv_head = self.get_kv_head_index(h);
 
-            let use_causal = match self.attention_type {
-                AttentionType::SlidingWindow { window_size: _ } => false,
-                AttentionType::GQAWithSlidingWindow {
-                    num_groups: _,
-                    window_size: _,
-                } => false,
-                _ => true,
-            };
+            let use_causal = !matches!(self.attention_type,
+                AttentionType::SlidingWindow { .. }
+                | AttentionType::GQAWithSlidingWindow { .. }
+            );
 
             for i in 0..seq_len {
                 let mut scores = vec![0.0f32; seq_len];
@@ -1959,43 +1953,42 @@ impl MultiHeadAttention {
                 let k_offset = kv_head * head_dim;
                 let v_offset = kv_head * head_dim;
 
-                for j in 0..seq_len {
+                for (j, score_val) in scores.iter_mut().enumerate() {
                     let mut score = 0.0f64;
-                    for d in 0..head_dim {
-                        score += q[i][q_offset + d] as f64 * k[j][k_offset + d] as f64;
+                    for (&q_val, &k_val) in q[i][q_offset..].iter()
+                        .zip(k[j][k_offset..].iter())
+                        .take(head_dim)
+                    {
+                        score += q_val as f64 * k_val as f64;
                     }
-                    scores[j] = (score as f32) * scale;
+                    *score_val = (score as f32) * scale;
                 }
 
                 if use_causal {
-                    for j in (i + 1)..seq_len {
-                        scores[j] = f32::NEG_INFINITY;
-                    }
+                    scores.iter_mut().skip(i + 1).for_each(|s| *s = f32::NEG_INFINITY);
                 }
 
                 if let Some(window) = self.sliding_window {
-                    for j in 0..seq_len {
+                    for (j, score_val) in scores.iter_mut().enumerate() {
                         let distance = i.abs_diff(j);
                         if distance > window {
-                            scores[j] = f32::NEG_INFINITY;
+                            *score_val = f32::NEG_INFINITY;
                         }
                     }
                 }
 
                 if let Some(mask) = attention_mask {
-                    for j in 0..seq_len {
+                    for (j, score_val) in scores.iter_mut().enumerate() {
                         if !mask[i][j] {
-                            scores[j] = f32::NEG_INFINITY;
+                            *score_val = f32::NEG_INFINITY;
                         }
                     }
                 }
 
                 if let PositionEncoding::ALiBi = self.position_encoding {
                     let slope = 2.0f32.powi(-8 - h as i32);
-                    for j in 0..seq_len {
-                        if j < i {
-                            scores[j] -= slope * (i - j) as f32;
-                        }
+                    for (j, score_val) in scores.iter_mut().enumerate().take(i) {
+                        *score_val -= slope * (i - j) as f32;
                     }
                 }
 
@@ -2003,25 +1996,25 @@ impl MultiHeadAttention {
                 let mut exp_sum = 0.0f64;
                 let mut exp_values = vec![0.0f32; seq_len];
 
-                for j in 0..seq_len {
-                    if scores[j] != f32::NEG_INFINITY && !scores[j].is_nan() {
-                        let exp_val = (scores[j] - max_score).exp();
-                        exp_values[j] = exp_val;
-                        exp_sum += exp_val as f64;
+                for (score_val, exp_val) in scores.iter().zip(exp_values.iter_mut()) {
+                    if *score_val != f32::NEG_INFINITY && !score_val.is_nan() {
+                        let exp = (*score_val - max_score).exp();
+                        *exp_val = exp;
+                        exp_sum += exp as f64;
                     }
                 }
 
-                for d in 0..head_dim {
+                for (d, out_val) in output[i][q_offset..].iter_mut().enumerate().take(head_dim) {
                     let mut weighted_sum = 0.0f64;
                     if exp_sum > 1e-12 {
-                        for j in 0..seq_len {
-                            if exp_values[j] > 0.0 {
-                                let weight = exp_values[j] as f64 / exp_sum;
+                        for (j, &exp_val) in exp_values.iter().enumerate() {
+                            if exp_val > 0.0 {
+                                let weight = exp_val as f64 / exp_sum;
                                 weighted_sum += weight * v[j][v_offset + d] as f64;
                             }
                         }
                     }
-                    output[i][q_offset + d] = weighted_sum as f32;
+                    *out_val = weighted_sum as f32;
                 }
             }
         }
@@ -2227,7 +2220,7 @@ impl FeedForward {
 impl LayerNorm {
     fn new(dim: usize, eps: f64, norm_type: &NormalizationType) -> Self {
         match norm_type {
-            NormalizationType::RMSNorm => LayerNorm {
+            NormalizationType::Rms => LayerNorm {
                 weight: vec![1.0f32; dim],
                 bias: None,
                 eps,
@@ -2244,7 +2237,7 @@ impl LayerNorm {
 
     fn forward(&self, x: &mut [Vec<f32>]) {
         match self.norm_type {
-            NormalizationType::RMSNorm => {
+            NormalizationType::Rms => {
                 for vec in x.iter_mut() {
                     let mean_square: f64 =
                         vec.iter().map(|&v| v as f64 * v as f64).sum::<f64>() / vec.len() as f64;
@@ -2256,9 +2249,9 @@ impl LayerNorm {
                     }
                 }
             }
-            NormalizationType::LayerNorm
-            | NormalizationType::PreLayerNorm
-            | NormalizationType::PostLayerNorm => {
+            NormalizationType::Layer
+            | NormalizationType::PreLayer
+            | NormalizationType::PostLayer => {
                 for vec in x.iter_mut() {
                     let mean: f64 = vec.iter().map(|&v| v as f64).sum::<f64>() / vec.len() as f64;
                     let variance: f64 = vec
@@ -2302,7 +2295,7 @@ mod tests {
             num_heads: 4,
             activation: ActivationFunction::GELU,
             position_encoding: PositionEncoding::RoPE,
-            normalization: NormalizationType::RMSNorm,
+            normalization: NormalizationType::Rms,
             attention: AttentionType::MHA,
             use_qkv_bias: true,
             use_mlp_bias: true,

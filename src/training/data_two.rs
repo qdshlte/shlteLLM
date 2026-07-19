@@ -25,6 +25,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 // ============================================================================
+// 类型别名
+// ============================================================================
+
+/// 批次数据类型: (input_batch, target_batch)
+type BatchData = (Vec<Vec<usize>>, Vec<Vec<usize>>);
+
+// ============================================================================
 // 批量数据加载器
 // ============================================================================
 
@@ -177,7 +184,7 @@ impl BatchLoader {
     // 批次获取（内存模式）
     // ========================================================================
 
-    pub fn next_batch(&mut self) -> Option<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+    pub fn next_batch(&mut self) -> Option<BatchData> {
         if self.streaming_mode {
             return self.next_batch_streaming();
         }
@@ -264,7 +271,7 @@ impl BatchLoader {
                 let seq_idx = self.rng.random_range(0..self.all_sequences.len());
                 let sequence = &self.all_sequences[seq_idx];
 
-                if sequence.len() >= self.sequence_length + 1 {
+                if sequence.len() > self.sequence_length {
                     let start_pos = if sequence.len() > self.sequence_length + 1 {
                         self.rng.random_range(0..sequence.len() - self.sequence_length)
                     } else {
@@ -309,7 +316,7 @@ impl BatchLoader {
     // ========================================================================
 
     /// 流式加载批次（使用缓冲区，避免加载全部数据到内存）
-    pub fn next_batch_streaming(&mut self) -> Option<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+    pub fn next_batch_streaming(&mut self) -> Option<BatchData> {
         let mut input_batch = Vec::with_capacity(self.batch_size);
         let mut target_batch = Vec::with_capacity(self.batch_size);
     
@@ -382,9 +389,7 @@ impl BatchLoader {
         // ====================================================================
         // 修复 P1-1: 不完整批次处理 - 使用随机采样填充
         // ====================================================================
-        if self.drop_last && input_batch.len() < self.batch_size {
-            None
-        } else if input_batch.is_empty() {
+        if (self.drop_last && input_batch.len() < self.batch_size) || input_batch.is_empty() {
             None
         } else if input_batch.len() < self.batch_size {
             let needed = self.batch_size - input_batch.len();
@@ -598,7 +603,7 @@ pub struct DataSplitter;
 
 impl DataSplitter {
     /// 按文件分割训练集和验证集
-    pub fn train_val_split<'a>(
+    pub fn train_val_split(
         data_paths: &[PathBuf],
         val_ratio: f64,
         seed: u64,
@@ -625,7 +630,7 @@ impl DataSplitter {
         sequences: &[Vec<usize>],
         val_ratio: f64,
         seed: u64,
-    ) -> Result<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+    ) -> Result<BatchData> {
         let mut rng = StdRng::seed_from_u64(seed);
         let mut indices: Vec<usize> = (0..sequences.len()).collect();
         indices.shuffle(&mut rng);
@@ -690,7 +695,7 @@ impl DataSplitter {
         let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
         for (idx, seq) in sequences.iter().enumerate() {
             let len = seq.len();
-            groups.entry(len).or_insert_with(Vec::new).push(idx);
+            groups.entry(len).or_default().push(idx);
         }
         
         let mut train_indices: Vec<usize> = Vec::new();
@@ -774,11 +779,10 @@ impl DataAugmenter {
                     let rand_val = rng.random::<f64>();
                     if rand_val < 0.8 {
                         *token = self.mask_token_id;
-                    } else if rand_val < 0.9 {
-                        if self.mask_token_id > 0 {
+                    } else if rand_val < 0.9
+                        && self.mask_token_id > 0 {
                             *token = rng.random_range(0..self.mask_token_id);
                         }
-                    }
                 }
             }
         }

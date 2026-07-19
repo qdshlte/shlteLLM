@@ -401,7 +401,7 @@ impl MixedPrecisionTrainer {
         data.iter().map(|&x| half::f16::from_f32(x)).collect()
     }
 
-    pub fn from_fp16(&self, data: &[half::f16]) -> Vec<f32> {
+    pub fn fp16_to_f32(data: &[half::f16]) -> Vec<f32> {
         data.iter().map(|x| x.to_f32()).collect()
     }
 
@@ -504,7 +504,7 @@ impl MixedPrecisionTrainer {
             self.update_scale(true);
             self.overflow_count += 1;
             
-            if self.total_steps % 100 == 0 {
+            if self.total_steps.is_multiple_of(100) {
                 eprintln!(
                     "⚠️ 梯度溢出 (步数 {}), loss_scale 降至 {:.2}, 总溢出次数: {}",
                     self.total_steps, self.loss_scale, self.overflow_count
@@ -553,7 +553,7 @@ impl MixedPrecisionTrainer {
                     self.loss_scale = new_scale;
                     self.skipped_steps = 0;
 
-                    if self.consecutive_non_overflow % (self.loss_scale_window * 3) == 0 {
+                    if self.consecutive_non_overflow.is_multiple_of(self.loss_scale_window * 3) {
                         println!("📈 loss_scale 增至 {:.2}", self.loss_scale);
                     }
                 }
@@ -618,7 +618,7 @@ impl Gradients {
                 weight: vec![0.0f32; hidden_dim],
                 bias: if matches!(
                     params.normalization,
-                    crate::config::NormalizationType::RMSNorm
+                    crate::config::NormalizationType::Rms
                 ) {
                     None
                 } else {
@@ -891,11 +891,11 @@ impl Gradients {
                 },
                 attention_norm: LayerNormGradients {
                     weight: copy_vector(flat, &mut offset, hidden_dim),
-                    bias: copy_optional_vector(flat, &mut offset, hidden_dim, !matches!(params.normalization, crate::config::NormalizationType::RMSNorm)),
+                    bias: copy_optional_vector(flat, &mut offset, hidden_dim, !matches!(params.normalization, crate::config::NormalizationType::Rms)),
                 },
                 ffn_norm: LayerNormGradients {
                     weight: copy_vector(flat, &mut offset, hidden_dim),
-                    bias: copy_optional_vector(flat, &mut offset, hidden_dim, !matches!(params.normalization, crate::config::NormalizationType::RMSNorm)),
+                    bias: copy_optional_vector(flat, &mut offset, hidden_dim, !matches!(params.normalization, crate::config::NormalizationType::Rms)),
                 },
             };
             layers.push(layer);
@@ -903,7 +903,7 @@ impl Gradients {
 
         let final_norm = LayerNormGradients {
             weight: copy_vector(flat, &mut offset, hidden_dim),
-            bias: copy_optional_vector(flat, &mut offset, hidden_dim, !matches!(params.normalization, crate::config::NormalizationType::RMSNorm)),
+            bias: copy_optional_vector(flat, &mut offset, hidden_dim, !matches!(params.normalization, crate::config::NormalizationType::Rms)),
         };
 
         let lm_head = copy_optional_matrix(flat, &mut offset, vocab_size, hidden_dim, !params.tied_embedding);
@@ -1147,7 +1147,7 @@ impl Trainer {
             }
             
             // 未溢出：先 unscale 梯度，然后更新参数
-            let num_micro_batches = ((batch_size + self.micro_batch_size - 1) / self.micro_batch_size).max(1);
+            let num_micro_batches = batch_size.div_ceil(self.micro_batch_size).max(1);
             
             if let Some(mut gradients) = accumulated_gradients {
                 // 平均微批次梯度
@@ -1178,7 +1178,7 @@ impl Trainer {
         } else {
             // 无混合精度：正常处理
             if let Some(mut gradients) = accumulated_gradients {
-                let num_micro_batches = ((batch_size + self.micro_batch_size - 1) / self.micro_batch_size).max(1);
+                let num_micro_batches = batch_size.div_ceil(self.micro_batch_size).max(1);
                 if num_micro_batches > 1 {
                     gradients.scale(1.0 / num_micro_batches as f32);
                 }
@@ -1407,7 +1407,7 @@ impl Trainer {
                 fs::remove_dir_all(&best_path)?;
             }
             // 使用硬链接而不是复制（节省空间）
-            fs::hard_link(&checkpoint_path.join("model.json"), &best_path.join("model.json"))?;
+            fs::hard_link(checkpoint_path.join("model.json"), best_path.join("model.json"))?;
         }
 
         self.cleanup_checkpoints(&checkpoint_dir)?;
@@ -1799,7 +1799,7 @@ mod tests {
             max_position_embeddings: 128,
             activation: ActivationFunction::GELU,
             position_encoding: PositionEncoding::RoPE,
-            normalization: NormalizationType::RMSNorm,
+            normalization: NormalizationType::Rms,
             attention_type: AttentionType::MHA,
             use_qkv_bias: true,
             use_mlp_bias: true,

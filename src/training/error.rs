@@ -253,8 +253,7 @@ impl From<reqwest::Error> for TrainError {
 
 impl From<prost::EncodeError> for TrainError {
     fn from(e: prost::EncodeError) -> Self {
-        TrainError::Serialization(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        TrainError::Serialization(serde_json::Error::io(std::io::Error::other(
             format!("Protobuf编码错误: {}", e),
         )))
     }
@@ -626,10 +625,14 @@ impl<T> OptionExt<T> for Option<T> {
 }
 
 // ============================================================================
-// 错误上下文包装器
+// 错误上下文包装器（已废弃 — 使用 ResultExt::context/with_context 替代）
 // ============================================================================
 
 /// 为Result添加上下文信息
+#[deprecated(
+    since = "3.1.15",
+    note = "请直接使用 ResultExt::context 或 ResultExt::with_context"
+)]
 pub trait Context<T> {
     fn context(self, context: &str) -> Result<T>;
     fn with_context<F>(self, f: F) -> Result<T>
@@ -637,6 +640,7 @@ pub trait Context<T> {
         F: FnOnce() -> String;
 }
 
+#[allow(deprecated)]
 impl<T> Context<T> for Result<T> {
     fn context(self, context: &str) -> Result<T> {
         self.map_err(|e| {
@@ -647,7 +651,7 @@ impl<T> Context<T> for Result<T> {
             }
         })
     }
-    
+
     fn with_context<F>(self, f: F) -> Result<T>
     where
         F: FnOnce() -> String,

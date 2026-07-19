@@ -23,7 +23,7 @@ use ratatui::{
 };
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
@@ -135,27 +135,27 @@ impl Dashboard {
     }
 
     /// 加载模型
-    pub fn load_model(&mut self, path: &PathBuf) -> Result<(), String> {
+    pub fn load_model(&mut self, path: &Path) -> Result<(), String> {
         if !path.exists() {
             return Err(format!("文件不存在: {}", path.display()));
         }
-        
+
         let path_str = path.to_string_lossy();
         if !path_str.ends_with(".gguf") {
             return Err("不是 GGUF 模型文件".to_string());
         }
-        
+
         // 释放旧模型
         self.ctx = None;
-        
+
         // 加载新模型
         let ctx = LlamaContext::new(path, 2048, 4)
             .map_err(|e| format!("加载模型失败: {}", e))?;
-        
+
         let info = ctx.get_model_info();
-        
+
         self.ctx = Some(ctx);
-        self.model_path = Some(path.clone());
+        self.model_path = Some(path.to_path_buf());
         self.model_info = Some(info);
         
         self.add_system_message(&format!(
@@ -715,10 +715,10 @@ impl Dashboard {
             let scrollbar = Scrollbar::default()
                 .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight);
 
-            let scroll_state = ScrollbarState::new(self.messages.len())
+            let mut scroll_state = ScrollbarState::new(self.messages.len())
                 .position(self.scroll_offset);
 
-            f.render_stateful_widget(scrollbar, area, &mut scroll_state.into());
+            f.render_stateful_widget(scrollbar, area, &mut scroll_state);
         }
     }
     
@@ -769,7 +769,7 @@ impl Dashboard {
             if self.is_generating { "⏳ Generating..." } else { "Ready" },
             self.messages.len(),
             self.scroll_offset,
-            self.messages.len().saturating_sub(20).max(0)
+            self.messages.len().saturating_sub(20)
         );
         
         let status_widget = Paragraph::new(status)

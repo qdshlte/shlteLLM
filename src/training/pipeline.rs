@@ -381,6 +381,20 @@ pub struct CsvLogger {
     file_path: PathBuf,
 }
 
+// ===== 训练步指标 =====
+
+#[derive(Debug, Clone, Default)]
+pub struct StepMetrics {
+    pub step: usize,
+    pub loss: f64,
+    pub eval_loss: Option<f64>,
+    pub learning_rate: f64,
+    pub tokens_per_second: f64,
+    pub epoch: usize,
+    pub gradient_norm: Option<f64>,
+    pub gpu_memory_mb: Option<f64>,
+}
+
 impl CsvLogger {
     /// 创建新的CSV日志器
     pub fn new(path: &Path) -> Result<Self> {
@@ -409,30 +423,20 @@ impl CsvLogger {
     }
 
     /// 记录训练步数
-    pub fn log_step(
-        &mut self,
-        step: usize,
-        loss: f64,
-        eval_loss: Option<f64>,
-        learning_rate: f64,
-        tokens_per_second: f64,
-        epoch: usize,
-        gradient_norm: Option<f64>,
-        gpu_memory_mb: Option<f64>,
-    ) -> Result<()> {
+    pub fn log_step(&mut self, metrics: &StepMetrics) -> Result<()> {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
 
         self.writer.write_record(&[
-            step.to_string(),
-            format!("{:.6}", loss),
-            eval_loss.map(|l| format!("{:.6}", l)).unwrap_or_default(),
-            format!("{:.8}", learning_rate),
-            format!("{:.2}", tokens_per_second),
-            epoch.to_string(),
-            gradient_norm
+            metrics.step.to_string(),
+            format!("{:.6}", metrics.loss),
+            metrics.eval_loss.map(|l| format!("{:.6}", l)).unwrap_or_default(),
+            format!("{:.8}", metrics.learning_rate),
+            format!("{:.2}", metrics.tokens_per_second),
+            metrics.epoch.to_string(),
+            metrics.gradient_norm
                 .map(|g| format!("{:.6}", g))
                 .unwrap_or_default(),
-            gpu_memory_mb
+            metrics.gpu_memory_mb
                 .map(|m| format!("{:.1}", m))
                 .unwrap_or_default(),
             timestamp.to_string(),
@@ -444,7 +448,16 @@ impl CsvLogger {
     /// 批量记录多个步数
     pub fn log_steps(&mut self, steps: &[(usize, f64, f64, f64)]) -> Result<()> {
         for (step, loss, lr, tps) in steps {
-            self.log_step(*step, *loss, None, *lr, *tps, 0, None, None)?;
+            self.log_step(&StepMetrics {
+                step: *step,
+                loss: *loss,
+                eval_loss: None,
+                learning_rate: *lr,
+                tokens_per_second: *tps,
+                epoch: 0,
+                gradient_norm: None,
+                gpu_memory_mb: None,
+            })?;
         }
         Ok(())
     }
@@ -798,7 +811,16 @@ pub fn run_training(
             } else {
                 0.0
             };
-            csv.log_step(step + 1, loss, None, lr, 0.0, 0, None, None)?;
+            csv.log_step(&StepMetrics {
+                step: step + 1,
+                loss,
+                eval_loss: None,
+                learning_rate: lr,
+                tokens_per_second: 0.0,
+                epoch: 0,
+                gradient_norm: None,
+                gpu_memory_mb: None,
+            })?;
         }
         csv.flush()?;
         println!("📄 CSV日志已写入: {}", csv.path().display());

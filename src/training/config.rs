@@ -15,12 +15,17 @@
 //!
 //! ============================================================================
 
+// ML 领域常见缩写（BPE, GELU, GEGLU, MHA, GQA, MQA, SGD, LAMB, CPU, CUDA, MPS）
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::extra_unused_lifetimes)]
+
 // ============================================================================
 // 标准库导入
 // ============================================================================
 
 use crate::error::{Result, TrainError};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::Path;
 use std::collections::HashSet;
@@ -230,12 +235,19 @@ pub enum PositionEncoding {
 // 归一化类型枚举
 // ============================================================================
 
+/// 归一化类型
+///
+/// 各变体说明：
+/// - `Rms`: RMS归一化 (RMS Layer Normalization)
+/// - `Layer`: 层归一化 (Layer Normalization)
+/// - `PreLayer`: 前置层归一化 (Pre-Layer Normalization), 在子层前应用归一化
+/// - `PostLayer`: 后置层归一化 (Post-Layer Normalization), 在子层后应用归一化
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NormalizationType {
-    RMSNorm,
-    LayerNorm,
-    PreLayerNorm,
-    PostLayerNorm,
+    Rms,
+    Layer,
+    PreLayer,
+    PostLayer,
 }
 
 // ============================================================================
@@ -668,8 +680,8 @@ impl Config {
         }
         
         // hidden_dim 必须能被 num_heads 整除
-        if self.model.hidden_dim > 0 && self.model.num_heads > 0 {
-            if !self.model.hidden_dim.is_multiple_of(self.model.num_heads) {
+        if self.model.hidden_dim > 0 && self.model.num_heads > 0
+            && !self.model.hidden_dim.is_multiple_of(self.model.num_heads) {
                 result.add_error(&format!(
                     "隐藏层维度({})必须能被注意力头数({})整除",
                     self.model.hidden_dim, self.model.num_heads
@@ -680,7 +692,6 @@ impl Config {
                     self.model.hidden_dim
                 ));
             }
-        }
         
         // 验证GQA配置
         match &self.model.attention {
@@ -756,7 +767,7 @@ impl Config {
                 if let Some(theta) = self.model.rope_theta {
                     if theta <= 0.0 {
                         result.add_error(&format!("RoPE theta 必须大于0，当前为{}", theta));
-                    } else if theta < 1000.0 || theta > 100000.0 {
+                    } else if !(1000.0..=100000.0).contains(&theta) {
                         result.add_warning(&format!("RoPE theta = {} 可能不是最优值，建议使用10000", theta));
                     }
                 }
@@ -768,15 +779,12 @@ impl Config {
         }
         
         // 验证归一化
-        match self.model.normalization {
-            NormalizationType::RMSNorm => {
-                if let Some(eps) = self.model.rms_norm_eps {
-                    if eps <= 0.0 || eps >= 1.0 {
-                        result.add_error(&format!("RMSNorm eps 必须在(0,1)范围内，当前为{}", eps));
-                    }
+        if self.model.normalization == NormalizationType::Rms {
+            if let Some(eps) = self.model.rms_norm_eps {
+                if eps <= 0.0 || eps >= 1.0 {
+                    result.add_error(&format!("RMSNorm eps 必须在(0,1)范围内，当前为{}", eps));
                 }
             }
-            _ => {}
         }
         
         // 验证最大位置编码长度
@@ -1172,7 +1180,7 @@ impl Config {
                 num_heads: 4,
                 activation: ActivationFunction::GELU,
                 position_encoding: PositionEncoding::NoPE,
-                normalization: NormalizationType::LayerNorm,
+                normalization: NormalizationType::Layer,
                 attention: AttentionType::MHA,
                 use_qkv_bias: true,
                 use_mlp_bias: true,
@@ -1255,7 +1263,7 @@ impl Config {
         config.training.num_steps = 5000;
         config.model.activation = ActivationFunction::SwiGLU;
         config.model.position_encoding = PositionEncoding::RoPE;
-        config.model.normalization = NormalizationType::RMSNorm;
+        config.model.normalization = NormalizationType::Rms;
         config.model.rope_theta = Some(10000.0);
         config.model.rms_norm_eps = Some(1e-6);
         config
@@ -1291,13 +1299,13 @@ impl Config {
 // DownloadSource 转换为字符串
 // ============================================================================
 
-impl ToString for DownloadSource {
-    fn to_string(&self) -> String {
+impl fmt::Display for DownloadSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DownloadSource::HuggingFace => "https://huggingface.co".to_string(),
-            DownloadSource::Mirror { url } => url.clone(),
-            DownloadSource::CustomUrl { url } => url.clone(),
-            DownloadSource::Local => "local".to_string(),
+            DownloadSource::HuggingFace => write!(f, "https://huggingface.co"),
+            DownloadSource::Mirror { url } => write!(f, "{}", url),
+            DownloadSource::CustomUrl { url } => write!(f, "{}", url),
+            DownloadSource::Local => write!(f, "local"),
         }
     }
 }
