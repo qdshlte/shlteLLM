@@ -142,7 +142,7 @@ impl Tokenizer {
     }
 
     /// 从配置创建分词器
-    fn from_config(config: &TokenizerConfig) -> Result<Self> {
+    pub(crate) fn from_config(config: &TokenizerConfig) -> Result<Self> {
         let mut tokenizer = Tokenizer {
             vocab: HashMap::new(),
             reverse_vocab: HashMap::new(),
@@ -158,7 +158,7 @@ impl Tokenizer {
             pad_token_id: 0,
             bos_token_id: 0,
             eos_token_id: 0,
-            _format_version: Some("3.0.0".to_string()),
+            _format_version: Some("3.2.2".to_string()),
             training_config: None,
         };
 
@@ -1228,7 +1228,8 @@ mod tests {
     #[test]
     fn test_tokenizer_creation() {
         let tokenizer = create_test_tokenizer();
-        assert_eq!(tokenizer.vocab_size(), 9);
+        // pad, bos, eos, unk, mask, sep, cls + 4 additional = 11 special tokens
+        assert_eq!(tokenizer.vocab_size(), 11);
     }
 
     #[test]

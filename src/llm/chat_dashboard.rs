@@ -58,6 +58,13 @@ pub struct Dashboard {
     pub message_sender: Option<mpsc::UnboundedSender<GenerationMessage>>,
     /// 最后生成的结果
     pub last_generation_result: Option<String>,
+    /// 生成参数
+    pub max_tokens: usize,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub repeat_penalty: f32,
+    /// 保存的历史对话文件路径（用于自动恢复）
+    pub history_file: Option<PathBuf>,
 }
 
 /// 生成过程中的消息
@@ -79,7 +86,7 @@ pub enum InputMode {
 }
 
 /// 聊天消息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
@@ -98,7 +105,7 @@ impl ChatMessage {
 }
 
 /// 消息角色
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MessageRole {
     User,
     Assistant,
@@ -131,6 +138,11 @@ impl Dashboard {
             message_receiver: Some(receiver),
             message_sender: Some(sender),
             last_generation_result: None,
+            max_tokens: 512,
+            temperature: 0.7,
+            top_p: 0.9,
+            repeat_penalty: 1.1,
+            history_file: None,
         }
     }
 
@@ -284,13 +296,12 @@ impl Dashboard {
 
         // 创建消息通道
         let (sender, receiver) = mpsc::unbounded_channel::<GenerationMessage>();
-        let sender_clone = sender.clone();
 
-        // 准备生成参数
-        let max_tokens = 512;
-        let temperature = 0.7;
-        let top_p = 0.9;
-        let repeat_penalty = 1.1;
+        // 准备生成参数（使用 Dashboard 配置）
+        let max_tokens = self.max_tokens;
+        let temperature = self.temperature;
+        let top_p = self.top_p;
+        let repeat_penalty = self.repeat_penalty;
 
         // 构建完整提示词
         let full_prompt = self.build_chat_prompt(&prompt);
@@ -303,16 +314,17 @@ impl Dashboard {
         self.messages.push(ChatMessage::new(MessageRole::Assistant, ""));
 
         // 保存消息通道用于后续接收
-        let old_sender = self.message_sender.replace(sender_clone);
+        let sender_for_thread = sender.clone();
+        let old_sender = self.message_sender.replace(sender);
         drop(old_sender);
         self.message_receiver = Some(receiver);
 
-        // 使用 std::thread::spawn 启动生成
-        std::thread::spawn(move || {
+        // 使用 std::thread::spawn 启动生成，并保存句柄
+        let task = std::thread::spawn(move || {
             let mut ctx = match LlamaContext::new(&model_path, 2048, 4) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = sender.send(GenerationMessage::Error(format!("无法加载模型: {}", e)));
+                    let _ = sender_for_thread.send(GenerationMessage::Error(format!("无法加载模型: {}", e)));
                     return;
                 }
             };
@@ -324,18 +336,51 @@ impl Dashboard {
                 top_p,
                 repeat_penalty,
                 |chunk| {
-                    let _ = sender.send(GenerationMessage::Chunk(chunk.to_string()));
+                    let _ = sender_for_thread.send(GenerationMessage::Chunk(chunk.to_string()));
                 },
             ) {
                 Ok(text) => {
-                    let _ = sender.send(GenerationMessage::Complete(text));
+                    let _ = sender_for_thread.send(GenerationMessage::Complete(text));
                 }
                 Err(e) => {
-                    let _ = sender.send(GenerationMessage::Error(e));
+                    let _ = sender_for_thread.send(GenerationMessage::Error(e));
                 }
             }
         });
 
+        self.generation_task = Some(task);
+        Ok(())
+    }
+
+    /// 设置生成参数
+    pub fn set_generation_params(&mut self, max_tokens: usize, temperature: f32, top_p: f32, repeat_penalty: f32) {
+        self.max_tokens = max_tokens;
+        self.temperature = temperature;
+        self.top_p = top_p;
+        self.repeat_penalty = repeat_penalty;
+    }
+
+    /// 保存当前对话历史到文件
+    pub fn save_history(&mut self, path: &Path) -> Result<(), String> {
+        let messages_json = serde_json::to_string_pretty(&self.messages)
+            .map_err(|e| format!("序列化失败: {}", e))?;
+        fs::write(path, messages_json)
+            .map_err(|e| format!("写入失败: {}", e))?;
+        self.history_file = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    /// 从文件加载对话历史
+    pub fn load_history(&mut self, path: &Path) -> Result<(), String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("读取失败: {}", e))?;
+        let messages: Vec<ChatMessage> = serde_json::from_str(&content)
+            .map_err(|e| format!("解析失败: {}", e))?;
+        if messages.is_empty() {
+            return Err("文件内容为空".to_string());
+        }
+        self.messages = messages;
+        self.history_file = Some(path.to_path_buf());
         Ok(())
     }
     
@@ -405,6 +450,27 @@ impl Dashboard {
                 self.is_generating = false;
                 self.scroll_offset = 0;
             }
+            "/save" => {
+                let path = if parts.len() > 1 {
+                    PathBuf::from(&parts[1])
+                } else {
+                    PathBuf::from("chat_history.json")
+                };
+                match self.save_history(&path) {
+                    Ok(()) => self.add_system_message(&format!("✅ 历史对话已保存到: {}", path.display())),
+                    Err(e) => self.add_system_message(&format!("❌ 保存失败: {}", e)),
+                }
+            }
+            "/loadhist" => {
+                if parts.len() < 2 {
+                    self.add_system_message("用法: /loadhist <路径>");
+                } else {
+                    match self.load_history(&PathBuf::from(&parts[1])) {
+                        Ok(()) => self.add_system_message("✅ 历史对话已加载"),
+                        Err(e) => self.add_system_message(&format!("❌ 加载失败: {}", e)),
+                    }
+                }
+            }
             "/info" => {
                 if let Some(info) = &self.model_info {
                     self.add_system_message(&format!(
@@ -426,6 +492,25 @@ impl Dashboard {
                     self.add_system_message("没有正在进行的生成任务");
                 }
             }
+            "/params" => {
+                if parts.len() < 5 {
+                    self.add_system_message(&format!(
+                        "用法: /params <max_tokens> <temperature> <top_p> <repeat_penalty>\n\
+                         当前参数: max_tokens={}, temperature={}, top_p={}, repeat_penalty={}",
+                        self.max_tokens, self.temperature, self.top_p, self.repeat_penalty
+                    ));
+                    return Ok(());
+                }
+                let max_tokens: usize = parts[1].parse().unwrap_or(self.max_tokens);
+                let temperature: f32 = parts[2].parse().unwrap_or(self.temperature);
+                let top_p: f32 = parts[3].parse().unwrap_or(self.top_p);
+                let repeat_penalty: f32 = parts[4].parse().unwrap_or(self.repeat_penalty);
+                self.set_generation_params(max_tokens, temperature, top_p, repeat_penalty);
+                self.add_system_message(&format!(
+                    "参数已更新: max_tokens={}, temperature={}, top_p={}, repeat_penalty={}",
+                    self.max_tokens, self.temperature, self.top_p, self.repeat_penalty
+                ));
+            }
             "/help" => {
                 self.add_system_message(
                     "可用命令:\n\
@@ -434,6 +519,7 @@ impl Dashboard {
                      /info         - 显示模型信息\n\
                      /clear        - 清空对话历史\n\
                      /stop         - 停止当前生成\n\
+                     /params <n> <t> <p> <r> - 设置生成参数\n\
                      /quit         - 退出\n\
                      /help         - 显示帮助\n\n\
                      直接输入文本即可与模型对话\n\n\
@@ -756,25 +842,49 @@ impl Dashboard {
     }
     
     fn draw_status_bar(&mut self, f: &mut Frame<'_>, area: Rect) {
-        let model_status = if let Some(path) = &self.model_path {
-            format!("✅ {}", path.file_name().unwrap().to_string_lossy())
+        // 模型状态
+        let model_info = if let Some(info) = &self.model_info {
+            format!(
+                "🤖 {}L·{}H·V{}", info.n_layer, info.n_head, info.n_vocab
+            )
         } else {
-            "❌ 未加载模型".to_string()
+            "❌ 未加载".to_string()
         };
-        
+
+        // 上下文利用率估算（基于消息 token 数）
+        let ctx_tokens: usize = self.messages.iter().map(|m| m.content.chars().count() / 2).sum();
+        let ctx_used = if self.ctx.as_ref().map_or(false, |c| c.context_size() > 0) {
+            let size = self.ctx.as_ref().map(|c| c.context_size()).unwrap_or(2048);
+            format!("{:.0}%", (ctx_tokens as f64 / size as f64) * 100.0)
+        } else {
+            "?".to_string()
+        };
+
+        // 历史文件
+        let hist = if let Some(p) = &self.history_file {
+            format!("💾{}", p.file_name().unwrap_or_default().to_string_lossy())
+        } else {
+            "".to_string()
+        };
+
         let status = format!(
-            " {} | Mode: {} | {} | Msgs: {} | Scroll: {}/{} | /help for commands ",
-            model_status,
+            " {} | {} | Ctx: {}% | {} | Mode: {} | {} | Msgs: {} | {}",
+            model_info,
+            if self.is_generating { "⏳Generating" } else { "✅ Ready" },
+            ctx_used,
+            self.last_generation_result
+                .as_ref()
+                .map(|r| format!("TOK:{:.0}", r.chars().count()))
+                .unwrap_or_else(|| "TOKENS:--".to_string()),
             if self.input_mode == InputMode::Normal { "NORMAL" } else { "INSERT" },
-            if self.is_generating { "⏳ Generating..." } else { "Ready" },
+            if self.is_generating { "STOP:c" } else { "HELP:/help" },
             self.messages.len(),
-            self.scroll_offset,
-            self.messages.len().saturating_sub(20)
+            hist
         );
-        
+
         let status_widget = Paragraph::new(status)
             .style(Style::default().fg(Color::Black).bg(Color::Gray));
-        
+
         f.render_widget(status_widget, area);
     }
 }

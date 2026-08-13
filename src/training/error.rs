@@ -630,7 +630,7 @@ impl<T> OptionExt<T> for Option<T> {
 
 /// 为Result添加上下文信息
 #[deprecated(
-    since = "3.1.15",
+    since = "3.2.2",
     note = "请直接使用 ResultExt::context 或 ResultExt::with_context"
 )]
 pub trait Context<T> {
@@ -927,7 +927,7 @@ mod tests {
     #[test]
     fn test_context() {
         let result: Result<i32> = Err(TrainError::Unknown("原始错误".to_string()));
-        let with_context = result.context("额外上下文");
+        let with_context = Context::context(result, "额外上下文");
         assert!(with_context.is_err());
     }
     

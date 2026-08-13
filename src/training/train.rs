@@ -1428,6 +1428,39 @@ impl Trainer {
         Ok((state.step, state.loss, model, state))
     }
 
+    /// 从检查点恢复训练状态
+    pub fn restore_checkpoint(
+        &mut self,
+        path: &Path,
+    ) -> Result<()> {
+        let (_, _, restored_model, state) = Self::load_checkpoint(path)?;
+
+        // 恢复模型权重
+        self.model = restored_model;
+
+        // 恢复训练状态
+        self.current_step = state.step;
+        self.best_loss = state.best_loss;
+        self.train_losses = state.train_losses;
+        self.eval_losses = state.eval_losses;
+        self.learning_rates = state.learning_rates;
+
+        // 恢复优化器状态（需要重新初始化以匹配当前参数量）
+        let total_params = self.model.num_parameters();
+        self.optimizer.step = state.optimizer_step;
+        self.optimizer.ensure_state_initialized(total_params);
+
+        // 恢复 EMA 模型
+        if self.ema_model.is_some() {
+            let ema_path = path.join("ema_model.json");
+            if ema_path.exists() {
+                self.ema_model = Some(Transformer::load(&ema_path)?);
+            }
+        }
+
+        Ok(())
+    }
+
     fn cleanup_checkpoints(&self, checkpoint_dir: &Path) -> Result<()> {
         let max_checkpoints = self.config.training.max_checkpoints;
 
@@ -1864,19 +1897,24 @@ mod tests {
         let params = create_test_params();
         let mut model = Transformer::new(params.clone());
         let mut ema_model = model.clone();
-        
+
         let decay = 0.9;
         let one_minus_decay = 0.1;
-        
+
+        // 将 EMA 模型初始权重设为已知值
+        if !ema_model.embedding.is_empty() && !ema_model.embedding[0].is_empty() {
+            ema_model.embedding[0][0] = 1.0;
+        }
+
         // 修改模型权重
         if !model.embedding.is_empty() && !model.embedding[0].is_empty() {
             model.embedding[0][0] = 2.0;
         }
-        
+
         Trainer::update_ema_inplace(&mut ema_model, &model, decay);
-        
+
         // 验证 EMA 公式: ema = decay * old_ema + (1-decay) * model
-        // old_ema 初始为 1.0，model 变为 2.0
+        // old_ema = 1.0，model = 2.0
         // 期望: 0.9 * 1.0 + 0.1 * 2.0 = 0.9 + 0.2 = 1.1
         if !ema_model.embedding.is_empty() && !ema_model.embedding[0].is_empty() {
             assert!((ema_model.embedding[0][0] - 1.1).abs() < 1e-6);

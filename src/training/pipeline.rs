@@ -529,7 +529,7 @@ pub fn run_training(
     output_dir: PathBuf,
     resume_from: Option<PathBuf>,
 ) -> Result<()> {
-    println!("🚀 启动 SHLTE LLM 训练流程 v3.1.15");
+    println!("🚀 启动 SHLTE LLM 训练流程 v3.2.2");
     println!("================================================");
 
     // ========================================================================
@@ -737,15 +737,11 @@ pub fn run_training(
     let mut trainer = Trainer::new(config.clone(), model, output_dir.clone());
 
     // 从检查点恢复
-    if let Some(checkpoint_path) = resume_from {
+    if let Some(ref checkpoint_path) = resume_from {
         println!("📂 从检查点恢复: {}", checkpoint_path.display());
-
-        match Trainer::load_checkpoint(&checkpoint_path) {
-            Ok((step, loss, _restored_model, state)) => {
-                println!("   恢复步数: {}", step);
-                println!("   恢复损失: {:.4}", loss);
-                println!("   最佳损失: {:.4}", state.best_loss);
-                // 注意：完整恢复需要替换trainer中的model和状态
+        match trainer.restore_checkpoint(checkpoint_path) {
+            Ok(()) => {
+                println!("   ✅ 检查点恢复成功");
             }
             Err(e) => {
                 println!("⚠️  检查点加载失败: {}", e);
@@ -850,7 +846,7 @@ pub fn run_training(
     let mut report = fs::File::create(&report_path)?;
 
     writeln!(report, "========================================")?;
-    writeln!(report, "SHLTE LLM 训练报告 v3.1.15")?;
+    writeln!(report, "SHLTE LLM 训练报告 v3.2.2")?;
     writeln!(report, "========================================\n")?;
     writeln!(report, "训练统计:")?;
     writeln!(report, "  训练步数: {}", trainer.current_step)?;
@@ -1041,73 +1037,349 @@ fn dir_size(path: &Path) -> Result<u64> {
 // 基准测试
 // ============================================================================
 
-/// 运行基准测试
-pub fn benchmark(config: &Config, output_dir: &Path) -> Result<()> {
-    println!("🔬 运行基准测试...");
+/// 基准测试结果统计
+#[derive(Debug, Clone)]
+struct BenchStats {
+    runs: Vec<std::time::Duration>,
+    config_name: String,
+    num_params: usize,
+    vocab_size: usize,
+    seq_len: usize,
+}
 
-    let mut bench_config = config.clone();
-    bench_config.model.num_layers = 2;
-    bench_config.model.hidden_dim = 128;
-    bench_config.training.num_steps = 100;
-    bench_config.training.batch_size = 4;
-
-    let start = std::time::Instant::now();
-
-    let model_params = ModelParams::from_config(&bench_config.model, 1000);
-    let model = Transformer::new(model_params);
-
-    let input_ids: Vec<usize> = (0..128).map(|i| i % 1000).collect();
-
-    // 前向传播基准
-    let forward_start = std::time::Instant::now();
-    for _ in 0..10 {
-        let _ = model.forward(&input_ids, true);
+impl BenchStats {
+    fn avg_ms(&self) -> f64 {
+        if self.runs.is_empty() { return 0.0; }
+        self.runs.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>() / self.runs.len() as f64
     }
-    let forward_time = forward_start.elapsed();
 
-    // 反向传播基准
-    let backward_start = std::time::Instant::now();
+    fn min_ms(&self) -> f64 {
+        if self.runs.is_empty() { return 0.0; }
+        self.runs.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::INFINITY, f64::min)
+    }
+
+    fn max_ms(&self) -> f64 {
+        if self.runs.is_empty() { return 0.0; }
+        self.runs.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    fn p50_ms(&self) -> f64 {
+        if self.runs.is_empty() { return 0.0; }
+        let mut times: Vec<f64> = self.runs.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = times.len() / 2;
+        if times.len() % 2 == 0 {
+            (times[mid - 1] + times[mid]) / 2.0
+        } else {
+            times[mid]
+        }
+    }
+
+    fn p99_ms(&self) -> f64 {
+        if self.runs.is_empty() { return 0.0; }
+        let mut times: Vec<f64> = self.runs.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = (times.len() as f64 * 0.99).ceil() as usize;
+        times[idx.min(times.len() - 1)]
+    }
+
+    fn tokens_per_sec(&self, seq_len: usize) -> f64 {
+        if self.runs.is_empty() { return 0.0; }
+        let avg_us = self.avg_ms() * 1000.0;
+        if avg_us <= 0.0 { return 0.0; }
+        (seq_len as f64 / avg_us) * 1_000_000.0
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "config": self.config_name,
+            "num_parameters": self.num_params,
+            "vocab_size": self.vocab_size,
+            "sequence_length": self.seq_len,
+            "avg_ms": format!("{:.3}", self.avg_ms()),
+            "min_ms": format!("{:.3}", self.min_ms()),
+            "max_ms": format!("{:.3}", self.max_ms()),
+            "p50_ms": format!("{:.3}", self.p50_ms()),
+            "p99_ms": format!("{:.3}", self.p99_ms()),
+            "tokens_per_sec": format!("{:.1}", self.tokens_per_sec(self.seq_len)),
+            "runs": self.runs.len()
+        })
+    }
+}
+
+/// 收集系统硬件信息
+fn get_hardware_info() -> serde_json::Value {
+    let cpu_count = num_cpus::get();
+    let mem_info = std::fs::read_to_string("/proc/meminfo")
+        .map(|s| {
+            let mut total_kb = 0u64;
+            for line in s.lines() {
+                if line.starts_with("MemTotal:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        total_kb = parts[1].parse::<u64>().unwrap_or(0);
+                    }
+                    break;
+                }
+            }
+            total_kb
+        })
+        .unwrap_or(0);
+    let total_mem_gb = mem_info as f64 / 1024.0 / 1024.0;
+
+    serde_json::json!({
+        "cpu_cores": cpu_count,
+        "total_memory_gb": format!("{:.1}", total_mem_gb),
+        "arch": std::env::consts::ARCH,
+        "os": std::env::consts::OS
+    })
+}
+
+/// 运行单次基准测试
+fn run_single_bench(
+    name: &str,
+    config: &Config,
+    vocab_size: usize,
+    seq_len: usize,
+    num_runs: usize,
+) -> BenchStats {
+    println!("   ──────────────────────────────────────────────");
+    println!("   配置: {} | 层数:{} 维:{} 头:{} 词表:{} 序列:{}",
+        name, config.model.num_layers, config.model.hidden_dim,
+        config.model.num_heads, vocab_size, seq_len);
+
+    let model_params = ModelParams::from_config(&config.model, vocab_size);
+    let model = Transformer::new(model_params);
+    let num_params = model.num_parameters();
+
+    let input_ids: Vec<usize> = (0..seq_len).map(|i| i % vocab_size).collect();
+
+    // 预热
+    for _ in 0..3 {
+        let _ = model.forward(&input_ids, false);
+    }
+
+    // 正式测试
+    let mut times: Vec<std::time::Duration> = Vec::new();
+    for _ in 0..num_runs {
+        let start = std::time::Instant::now();
+        let _ = model.forward(&input_ids, false);
+        let elapsed = start.elapsed();
+        times.push(elapsed);
+    }
+
+    BenchStats {
+        runs: times,
+        config_name: name.to_string(),
+        num_params,
+        vocab_size,
+        seq_len,
+    }
+}
+
+/// 运行反向传播基准
+fn run_backward_bench(
+    name: &str,
+    config: &Config,
+    vocab_size: usize,
+    seq_len: usize,
+    num_runs: usize,
+) -> BenchStats {
+    println!("   ──────────────────────────────────────────────");
+    println!("   反向传播: {} | 层数:{} 维:{} 词表:{} 序列:{}",
+        name, config.model.num_layers, config.model.hidden_dim, vocab_size, seq_len);
+
+    let model_params = ModelParams::from_config(&config.model, vocab_size);
+    let model = Transformer::new(model_params);
+    let num_params = model.num_parameters();
+
+    let input_ids: Vec<usize> = (0..seq_len).map(|i| i % vocab_size).collect();
+    let targets: Vec<usize> = (0..seq_len).map(|i| (i + 1) % vocab_size).collect();
+
+    // 前向传播获取 logits
     let logits = match model.forward(&input_ids, false) {
         Ok(l) => l,
         Err(e) => {
-            println!("⚠️  前向传播失败: {}", e);
-            return Err(e);
+            println!("   ⚠️  前向传播失败: {}", e);
+            return BenchStats {
+                runs: vec![],
+                config_name: name.to_string(),
+                num_params,
+                vocab_size,
+                seq_len,
+            };
         }
     };
-    let targets: Vec<usize> = (1..129).map(|i| i % 1000).collect();
 
-    for _ in 0..10 {
+    // 预热
+    for _ in 0..3 {
         let _ = model.backward(&logits, &targets);
     }
-    let backward_time = backward_start.elapsed();
 
-    let total_time = start.elapsed();
+    // 正式测试
+    let mut times: Vec<std::time::Duration> = Vec::new();
+    for _ in 0..num_runs {
+        let logits = model.forward(&input_ids, false).unwrap();
+        let start = std::time::Instant::now();
+        let _ = model.backward(&logits, &targets);
+        let elapsed = start.elapsed();
+        times.push(elapsed);
+    }
 
-    println!("📊 基准测试结果:");
-    println!("   前向传播 (10次): {:?}", forward_time);
-    println!("     平均: {:?}/次", forward_time / 10);
-    println!("   反向传播 (10次): {:?}", backward_time);
-    println!("     平均: {:?}/次", backward_time / 10);
-    println!("   总时间: {:?}", total_time);
+    BenchStats {
+        runs: times,
+        config_name: name.to_string(),
+        num_params,
+        vocab_size,
+        seq_len,
+    }
+}
 
-    let bench_results = serde_json::json!({
-        "forward_time_us": forward_time.as_micros(),
-        "forward_avg_us": forward_time.as_micros() / 10,
-        "backward_time_us": backward_time.as_micros(),
-        "backward_avg_us": backward_time.as_micros() / 10,
-        "total_time_us": total_time.as_micros(),
-        "config": {
-            "num_layers": bench_config.model.num_layers,
-            "hidden_dim": bench_config.model.hidden_dim,
-            "num_heads": bench_config.model.num_heads,
-            "batch_size": bench_config.training.batch_size,
-            "sequence_length": bench_config.training.sequence_length,
+/// 运行基准测试
+pub fn benchmark(_config: &Config, output_dir: &Path) -> Result<()> {
+    println!("\n🔬 开始系统基准测试...\n");
+
+    // 创建输出目录
+    fs::create_dir_all(output_dir)?;
+
+    // 硬件信息
+    let hw_info = get_hardware_info();
+    println!("💻 硬件信息:");
+    println!("   CPU 核心: {}", hw_info["cpu_cores"]);
+    println!("   总内存: {} GB", hw_info["total_memory_gb"]);
+    println!("   架构: {} / {}", hw_info["arch"], hw_info["os"]);
+    println!();
+
+    // 测试配置列表
+    let test_configs = vec![
+        ("Tiny (MHA)", Config::tiny_preset(), 4096, 128),
+        ("Small (SwiGLU+RoPE)", Config::small_preset(), 8192, 256),
+        ("Base (GQA+BF16)", Config::base_preset(), 32768, 512),
+    ];
+
+    let num_runs = 10;
+    let mut forward_results: Vec<BenchStats> = Vec::new();
+    let mut backward_results: Vec<BenchStats> = Vec::new();
+
+    let total_start = std::time::Instant::now();
+
+    // 前向传播基准
+    println!("📊 前向传播基准测试 ({} 次迭代/配置)", num_runs);
+    for (name, bench_config, vocab_size, seq_len) in &test_configs {
+        let stats = run_single_bench(name, bench_config, *vocab_size, *seq_len, num_runs);
+        forward_results.push(stats);
+    }
+    println!();
+
+    // 反向传播基准
+    println!("📊 反向传播基准测试 ({} 次迭代/配置)", num_runs);
+    for (name, bench_config, vocab_size, seq_len) in &test_configs {
+        let stats = run_backward_bench(name, bench_config, *vocab_size, *seq_len, num_runs);
+        backward_results.push(stats);
+    }
+    println!();
+
+    let total_time = total_start.elapsed();
+
+    // 输出前向传播结果
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                    前向传播 性能结果                        ║");
+    println!("╠══════════════════╦═══════╦═══════╦═══════╦═══════╦═══════╣");
+    println!("║ 配置             ║ 平均  ║ 最小  ║ 最大  ║ P50   ║ P99   ║");
+    println!("╠══════════════════╬═══════╬═══════╬═══════╬═══════╬═══════╣");
+    for stats in &forward_results {
+        println!("║ {:<18} ║ {:>5.2} ║ {:>5.2} ║ {:>5.2} ║ {:>5.2} ║ {:>5.2} ║",
+            &stats.config_name[..18.min(stats.config_name.len())],
+            stats.avg_ms(), stats.min_ms(), stats.max_ms(),
+            stats.p50_ms(), stats.p99_ms());
+    }
+    println!("╚══════════════════╩═══════╩═══════╩═══════╩═══════╩═══════╝");
+    println!("   单位: ms/次  |  吞吐量单位: tokens/sec\n");
+
+    // 输出反向传播结果
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                   反向传播 性能结果                         ║");
+    println!("╠══════════════════╦═══════╦═══════╦═══════╦═══════╦═══════╣");
+    println!("║ 配置             ║ 平均  ║ 最小  ║ 最大  ║ P50   ║ P99   ║");
+    println!("╠══════════════════╬═══════╬═══════╬═══════╬═══════╬═══════╣");
+    for stats in &backward_results {
+        println!("║ {:<18} ║ {:>5.2} ║ {:>5.2} ║ {:>5.2} ║ {:>5.2} ║ {:>5.2} ║",
+            &stats.config_name[..18.min(stats.config_name.len())],
+            stats.avg_ms(), stats.min_ms(), stats.max_ms(),
+            stats.p50_ms(), stats.p99_ms());
+    }
+    println!("╚══════════════════╩═══════╩═══════╩═══════╩═══════╩═══════╝");
+    println!();
+
+    // 计算总参数和吞吐量
+    let total_params: usize = forward_results.iter().map(|s| s.num_params).sum();
+    println!("📈 汇总:");
+    println!("   测试配置数: {}", forward_results.len());
+    println!("   总参数量: {:.2}M", total_params as f64 / 1e6);
+    println!("   总耗时: {:?}", total_time);
+
+    // 各配置吞吐量
+    for stats in &forward_results {
+        let tps = stats.tokens_per_sec(stats.seq_len);
+        println!("   {} 吞吐量: {:.1} tokens/sec", stats.config_name, tps);
+    }
+    println!();
+
+    // 保存 JSON 结果
+    let bench_data = serde_json::json!({
+        "hardware": hw_info,
+        "total_time_ms": total_time.as_secs_f64() * 1000.0,
+        "forward_pass": forward_results.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
+        "backward_pass": backward_results.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
+        "summary": {
+            "configs_tested": forward_results.len(),
+            "total_parameters": total_params,
+            "avg_forward_ms": forward_results.iter().map(|s| s.avg_ms()).collect::<Vec<_>>(),
+            "avg_backward_ms": backward_results.iter().map(|s| s.avg_ms()).collect::<Vec<_>>()
         }
     });
 
     let bench_path = output_dir.join("benchmark_results.json");
-    fs::write(&bench_path, bench_results.to_string())?;
-    println!("📊 基准测试结果已保存: {}", bench_path.display());
+    fs::write(&bench_path, bench_data.to_string())?;
+    println!("✅ 基准测试结果已保存: {}", bench_path.display());
+
+    // 同时保存可读文本报告
+    let report_path = output_dir.join("benchmark_report.txt");
+    let mut report = String::new();
+    report.push_str("============================================================\n");
+    report.push_str("           shlteLLM 基准测试报告\n");
+    report.push_str("============================================================\n\n");
+    report.push_str(&format!("硬件配置:\n"));
+    report.push_str(&format!("  CPU 核心: {}\n", hw_info["cpu_cores"]));
+    report.push_str(&format!("  总内存: {} GB\n", hw_info["total_memory_gb"]));
+    report.push_str(&format!("  架构: {}/{}\n\n", hw_info["arch"], hw_info["os"]));
+    report.push_str(&format!("测试耗时: {:?}\n\n", total_time));
+
+    report.push_str("前向传播结果:\n");
+    report.push_str("------------------------------------------------------------\n");
+    for stats in &forward_results {
+        report.push_str(&format!(
+            "  {}: avg={:.2}ms min={:.2}ms max={:.2}ms p50={:.2}ms p99={:.2}ms | {:.1} tok/s | {:.2}M params\n",
+            stats.config_name,
+            stats.avg_ms(), stats.min_ms(), stats.max_ms(), stats.p50_ms(), stats.p99_ms(),
+            stats.tokens_per_sec(stats.seq_len),
+            stats.num_params as f64 / 1e6
+        ));
+    }
+
+    report.push_str("\n反向传播结果:\n");
+    report.push_str("------------------------------------------------------------\n");
+    for stats in &backward_results {
+        report.push_str(&format!(
+            "  {}: avg={:.2}ms min={:.2}ms max={:.2}ms p50={:.2}ms p99={:.2}ms | {:.2}M params\n",
+            stats.config_name,
+            stats.avg_ms(), stats.min_ms(), stats.max_ms(), stats.p50_ms(), stats.p99_ms(),
+            stats.num_params as f64 / 1e6
+        ));
+    }
+
+    fs::write(&report_path, report)?;
+    println!("📄 文本报告已保存: {}", report_path.display());
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 [package]
 name = "shlteLLM"
-version = "3.1.15"
+version = "3.2.2"
 edition = "2021"
 authors = ["QD·shlte"]
 description = "LLM训练工具"

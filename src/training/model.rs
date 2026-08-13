@@ -473,22 +473,14 @@ impl Transformer {
     }
 
     /// 保存为 MessagePack 格式
-    fn save_as_msgpack(&self, path: &Path, config: &ModelSaveConfig) -> Result<()> {
+    fn save_as_msgpack(&self, path: &Path, _config: &ModelSaveConfig) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
-        
-        if config.save_metadata {
-            let metadata = self.create_metadata(config);
-            let metadata_bytes = rmp_serde::to_vec(&metadata)
-                .map_err(|e| TrainError::Model(format!("元数据序列化失败: {}", e)))?;
-            let metadata_len = (metadata_bytes.len() as u32).to_le_bytes();
-            writer.write_all(&metadata_len)?;
-            writer.write_all(&metadata_bytes)?;
-        }
-        
+
+        // 不再写入前置元数据，避免加载时格式不兼容
         rmp_serde::encode::write(&mut writer, self)
             .map_err(|e| TrainError::Model(format!("MessagePack序列化失败: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -497,19 +489,11 @@ impl Transformer {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
         let mut encoder = GzEncoder::new(writer, Compression::new(config.compression_level));
-        
-        if config.save_metadata {
-            let metadata = self.create_metadata(config);
-            let metadata_bytes = rmp_serde::to_vec(&metadata)
-                .map_err(|e| TrainError::Model(format!("元数据序列化失败: {}", e)))?;
-            let metadata_len = (metadata_bytes.len() as u32).to_le_bytes();
-            encoder.write_all(&metadata_len)?;
-            encoder.write_all(&metadata_bytes)?;
-        }
-        
+
+        // 不再写入前置元数据，避免加载时格式不兼容
         rmp_serde::encode::write(&mut encoder, self)
             .map_err(|e| TrainError::Model(format!("压缩序列化失败: {}", e)))?;
-        
+
         encoder.finish()?;
         Ok(())
     }
@@ -577,6 +561,7 @@ impl Transformer {
             total_params,
             param_dtype: "f32".to_string(),
             model_structure: model_without_weights,
+            shard_dir_name: format!("{}_shards", base_name),
         };
         
         let manifest_path = parent.join(format!("{}.manifest.json", base_name));
@@ -672,10 +657,10 @@ impl Transformer {
     pub fn load_from_msgpack(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        
+
         let model: Transformer = rmp_serde::decode::from_read(reader)
             .map_err(|e| TrainError::Model(format!("MessagePack解析失败: {}", e)))?;
-        
+
         Ok(model)
     }
 
@@ -683,11 +668,30 @@ impl Transformer {
     pub fn load_from_compressed_msgpack(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let decoder = GzDecoder::new(reader);
-        
-        let model: Transformer = rmp_serde::decode::from_read(decoder)
+        let mut decoder = GzDecoder::new(reader);
+        let mut raw = Vec::new();
+        decoder.read_to_end(&mut raw)?;
+
+        // 检查是否有前置元数据
+        let start = if raw.len() >= 4 {
+            let len_bytes: [u8; 4] = [raw[0], raw[1], raw[2], raw[3]];
+            let meta_len = u32::from_le_bytes(len_bytes) as usize;
+            if meta_len > 0 && meta_len + 4 <= raw.len() {
+                if raw[4] & 0xF0 == 0x80 || raw[4] == 0xDF {
+                    4 + meta_len
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let model: Transformer = rmp_serde::decode::from_slice(&raw[start..])
             .map_err(|e| TrainError::Model(format!("压缩文件解析失败: {}", e)))?;
-        
+
         Ok(model)
     }
 
@@ -700,10 +704,11 @@ impl Transformer {
             .map_err(|e| TrainError::Model(format!("清单解析失败: {}", e)))?;
         
         let parent = manifest_path.parent().unwrap();
+        let shard_dir = parent.join(&manifest.shard_dir_name);
         let mut all_param_bytes = Vec::with_capacity(manifest.total_params * 4);
-        
+
         for shard_info in &manifest.shard_infos {
-            let shard_path = parent.join(&shard_info.file_name);
+            let shard_path = shard_dir.join(&shard_info.file_name);
             let shard_data = fs::read(&shard_path)
                 .map_err(|e| TrainError::Model(format!("读取分片 {} 失败: {}", shard_info.shard_id, e)))?;
             all_param_bytes.extend_from_slice(&shard_data);
@@ -1383,6 +1388,8 @@ struct ShardManifest {
     total_params: usize,
     param_dtype: String,
     model_structure: Transformer,
+    /// 分片目录名称（与 base_name 拼接得到完整路径）
+    pub shard_dir_name: String,
 }
 
 // ============================================================================

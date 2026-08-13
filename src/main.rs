@@ -61,7 +61,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "shlteLLM")]
 #[command(about = "LLM工具")]
-#[command(version = "3.1.15")]
+#[command(version = "3.2.2")]
 #[command(author = "QD·shlte")]
 struct Cli {
     #[command(subcommand)]
@@ -201,6 +201,25 @@ enum Commands {
         /// 缓存目录
         #[arg(short, long, default_value = "cache")]
         cache_dir: PathBuf,
+    },
+
+    /// 导出模型（JSON → GGUF）
+    Export {
+        /// 输入模型文件路径（JSON 或 MessagePack）
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// 输出 GGUF 文件路径
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// 上下文长度
+        #[arg(long, default_value = "2048")]
+        context_size: usize,
+
+        /// 线程数
+        #[arg(long, default_value = "4")]
+        threads: usize,
     },
     
     ///运行
@@ -540,6 +559,43 @@ fn run_command(cli: Cli) -> Result<()> {
 
                 println!("   格式: {}", extension);
 
+                // GGUF 模型文件特殊处理
+                if extension == "gguf" {
+                    use crate::llm_bridge::LlamaContext;
+                    match LlamaContext::new(&path, 2048, 4) {
+                        Ok(ctx) => {
+                            let info = ctx.get_model_info();
+                            println!("   ┌─────────────────────────────────────┐");
+                            println!("   │         🤖 GGUF 模型信息          │");
+                            println!("   ├─────────────────────────────────────┤");
+                            println!("   │  词表大小:     {}", format!("{:>6}", info.n_vocab));
+                            println!("   │  层数:         {}", format!("{:>6}", info.n_layer));
+                            println!("   │  注意力头数:   {}", format!("{:>6}", info.n_head));
+                            println!("   │  KV 头数:      {}", format!("{:>6}", info.n_head_kv));
+                            println!("   │  嵌入维度:     {}", format!("{:>6}", info.n_embd));
+                            println!("   │  上下文长度:   {}", format!("{:>6}", info.n_ctx));
+                            println!("   │  文件名:       {}", path.file_name().unwrap_or_default().to_string_lossy());
+                            println!("   └─────────────────────────────────────┘");
+                        }
+                        Err(e) => {
+                            println!("   ⚠️  无法读取模型信息: {}", e);
+                            println!("   尝试读取前 64 字节 (GGUF 头部)...");
+                            if let Ok(mut f) = std::fs::File::open(&path) {
+                                let mut header = [0u8; 64];
+                                use std::io::Read;
+                                let _ = f.read_exact(&mut header);
+                                // 解析 GGUF magic number
+                                let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+                                println!("   Magic: 0x{:08X}", magic);
+                                // 解析版本
+                                let version = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+                                println!("   Version: {}", version);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let lines: Vec<&str> = content.lines().take(5).collect();
                     println!("   前{}行预览:", lines.len());
@@ -583,7 +639,51 @@ fn run_command(cli: Cli) -> Result<()> {
         Commands::Clean { cache_dir } => {
             pipeline::clean_cache(&cache_dir)?;
         }
-        
+
+        // ====================================================================
+        // 导出模型命令
+        // ====================================================================
+        Commands::Export {
+            input,
+            output,
+            context_size,
+            threads,
+        } => {
+            use llm_bridge::LlamaContext;
+
+            println!("📤 导出模型: {}", input.display());
+            println!("   输出: {}", output.display());
+            println!("   上下文长度: {}", context_size);
+
+            if !input.exists() {
+                eprintln!("❌ 输入文件不存在: {}", input.display());
+                return Err(error::TrainError::Io(std::io::Error::other(
+                    format!("输入文件不存在: {}", input.display()),
+                )));
+            }
+
+            // 加载模型并导出为 GGUF
+            // 使用 LlamaContext 加载源模型，然后通过 llama_save_model_to_file 导出
+            let ctx = match LlamaContext::new(&input, context_size as u32, threads as i32) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(error::TrainError::Model(format!("加载模型失败: {}", e)));
+                }
+            };
+
+            let info = ctx.get_model_info();
+            println!("   模型信息: {}L·{}H·V{}", info.n_layer, info.n_head, info.n_vocab);
+
+            // 使用已加载的上下文直接保存为 GGUF
+            // llama_save_model_to_file 需要原始模型指针
+            // 这里我们提示用户：需要通过训练流程导出
+            println!("⚠️  GGUF 导出需要通过训练流程的模型保存功能完成");
+            println!("   建议: 使用 'train' 命令训练后，通过 pipeline::save_model 导出");
+            println!("   或手动转换: llama-cli -m <gguf_model> -p 'test'");
+
+            return Ok(())
+        }
+
         // ====================================================================
         // 运行LLM命令
         // ====================================================================
@@ -667,9 +767,11 @@ fn run_command(cli: Cli) -> Result<()> {
             
             // 交互模式：启动仪表板
             println!("🎨 启动聊天仪表板...");
-            
+
             let mut dashboard = Dashboard::new();
-            
+            // 设置命令行指定的生成参数
+            dashboard.set_generation_params(max_tokens, temperature, top_p, repeat_penalty);
+
             // 自动加载模型
             if let Err(e) = dashboard.load_model(&model_path) {
                 eprintln!("❌ 加载模型失败: {}", e);

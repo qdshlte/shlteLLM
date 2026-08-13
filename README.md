@@ -1,119 +1,171 @@
-**SHLTE - LLM**
----
-一个用 Rust 编写的高性能大语言模型训练框架，覆盖从数据下载、预处理、分词器训练到模型训练和评估的完整流程。
+# SHLTE LLM
+
+一个 Rust 编写的 LLM 训练与推理工具集，支持从数据准备到模型训练的全流程，以及 GGUF 模型的本地推理。
+
+**版本**: 3.2.2
 
 ---
 
-✨ 核心特性
+## ✨ 核心功能
 
-· 模块化设计 – 数据、模型、训练、数据库完全解耦，易于扩展和定制
-· 丰富的模型架构 – 支持 MHA、GQA、MQA、滑动窗口注意力、Flash Attention 等多种注意力机制
-· 灵活配置系统 – 基于 TOML 的配置文件，提供 tiny、small、base 三种预设模板
-· 高效数据预处理 – 支持 Parquet、JSONL、CSV、纯文本等多种输入格式
-· 混合精度训练 – 支持 FP16、BF16、FP8，显著降低显存占用
-· 训练状态持久化 – 完善的检查点保存与恢复机制，配合 SQLite 数据库记录全部训练指标
-· 梯度累积 – 通过 micro_batch_size 支持等效大 batch 训练
-· EMA 模型 – 指数移动平均，提升模型稳定性与泛化能力
-· 多种优化器 – AdamW、Adam、SGD、LAMB
-· 灵活的学习率调度 – Linear、Cosine、CosineWithRestarts、Constant、OneCycle
+- **模型训练** — 完整训练流程，支持 CPU/CUDA/ROCm/MPS
+- **TUI 聊天** — 交互式终端聊天界面，支持流式生成和对话历史
+- **数据下载** — 自动从 HuggingFace 下载数据集，支持镜像站加速
+- **数据预处理** — 支持 Parquet / JSONL / CSV / TXT 格式
+- **分词器训练** — BPE / WordPiece / Unigram / SentencePiece
+- **GGUF 导出** — 模型导出为 GGUF 格式，兼容 llama.cpp
+- **配置验证** — 自动生成配置并提供详细的合法性检查
 
 ---
 
-🚀 快速上手
-
-安装
+## 📦 安装
 
 ```bash
-# 克隆仓库并编译
-git clone https://github.com/yourusername/shltechat.git
-cd shltechat
+# 克隆仓库
+git clone https://github.com/yourusername/shlteLLM.git
+cd shlteLLM
+
+# 编译发布版本
 cargo build --release
-
-# 编译后的二进制文件位于 target/release/shltechat
 ```
 
-生成配置并开始训练
+编译后的二进制文件位于 `target/release/shlteLLM`。
+
+---
+
+## 🚀 快速开始
+
+### 1. 生成配置文件
 
 ```bash
-# 生成 tiny 预设配置（适合快速功能测试）
-shltechat generate --preset tiny
+# 生成预设配置 (tiny / small / base)
+shlteLLM generate --preset base -o config.toml
+```
 
-# 开始训练
-shltechat train
+### 2. 验证配置
+
+```bash
+shlteLLM validate -c config.toml
+```
+
+### 3. 开始训练
+
+```bash
+shlteLLM train -c config.toml -o output
+```
+
+### 4. 交互聊天
+
+```bash
+# 启动 TUI 聊天界面
+shlteLLM chat
+
+# 或在命令行中直接使用提示词
+shlteLLM chat -p "你好，请介绍一下你自己"
 ```
 
 ---
 
-📖 命令详解
+## 📋 命令详解
 
-train – 模型训练
-
-```bash
-shltechat train [OPTIONS]
-```
-
-选项 说明 默认值
--c, --config 配置文件路径 config.toml
--o, --output 输出目录 output
---resume 从指定检查点恢复训练 -
---preset 使用预设配置 (tiny/small/base) -
-
-download – 数据集下载
+### `train` — 模型训练
 
 ```bash
-shltechat download -d <DATASET> -o <OUTPUT>
+shlteLLM train [OPTIONS]
 ```
 
-preprocess – 数据预处理
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `-c, --config` | 配置文件路径 | `config.toml` |
+| `-o, --output` | 输出目录 | `output` |
+| `--resume` | 从检查点恢复 | - |
+| `--preset` | 使用预设配置 | `tiny/small/base` |
+
+### `chat` — 交互聊天
 
 ```bash
-shltechat preprocess -i <INPUT> -o <OUTPUT> -t <TOKENIZER_CONFIG>
+shlteLLM chat [OPTIONS]
 ```
 
-train-tokenizer – 训练分词器
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `-p, --prompt` | 非交互模式提示词 | - |
+| `-m, --model` | 模型文件路径（`.gguf`） | 自动搜索当前目录 |
+| `--max-tokens` | 最大生成 token 数 | `512` |
+| `--temperature` | 温度参数 (0.0-2.0) | `0.7` |
+| `--top-p` | Top-p 采样参数 | `0.9` |
+| `--repeat-penalty` | 重复惩罚系数 | `1.1` |
+| `--context-size` | 上下文长度 | `2048` |
+| `--threads` | 线程数 | `4` |
+
+### `download` — 数据集下载
 
 ```bash
-shltechat train-tokenizer \
-  -i <INPUT_FILE> \
-  -o <OUTPUT_FILE> \
-  --algorithm bpe \
-  --vocab_size 32000
+shlteLLM download -d <DATASET> -o <OUTPUT>
 ```
 
-validate – 验证配置文件
+支持从 HuggingFace 及镜像站下载数据集。
+
+### `preprocess` — 数据预处理
 
 ```bash
-shltechat validate -c config.toml
+shlteLLM preprocess -i <INPUT> -o <OUTPUT> -t <TOKENIZER_CONFIG>
 ```
 
-验证项包括：数据集百分比总和、隐藏维度整除性、GQA 组数合法性、序列长度限制、学习率正值检查、dropout 范围、滑动窗口约束等。
-
-generate – 生成配置
+### `train-tokenizer` — 训练分词器
 
 ```bash
-# 生成指定预设
-shltechat generate -o my_config.toml --preset base
-
-# 批量生成所有预设到目录
-shltechat generate-presets -o ./presets
+shlteLLM train-tokenizer -i <INPUT> -o <OUTPUT> --algorithm bpe --vocab_size 32000
 ```
 
-其他实用命令
+支持的算法：`bpe`、`wordpiece`、`unigram`、`sentencepiece`。
 
-命令 用途
-benchmark 基准测试：-c config.toml -o ./benchmark_output
-inspect 检查数据：-p ./data/shard_0000.preprocessed.txt
-clean 清理缓存：-c ./cache
+### `validate` — 验证配置
+
+```bash
+shlteLLM validate -c config.toml
+```
+
+检查数据集百分比、模型维度整除性、GQA 组数、学习率、dropout 范围等。
+
+### `generate` — 生成配置
+
+```bash
+# 生成单个预设
+shlteLLM generate --preset base -o config.toml
+
+# 批量生成所有预设
+shlteLLM generate-presets -o ./presets
+```
+
+### `export` — 导出模型
+
+```bash
+shlteLLM export -i model.json -o model.gguf --context-size 2048
+```
+
+### `inspect` — 检查文件
+
+```bash
+shlteLLM inspect -p ./data/train.parquet
+```
+
+可查看文件大小、格式预览，以及 GGUF 模型元信息。
+
+### `clean` — 清理缓存
+
+```bash
+shlteLLM clean -c ./cache
+```
 
 ---
 
-⚙️ 配置详解
+## ⚙️ 配置说明
 
-📊 [dataset] — 数据集配置
+### 数据集配置 `[dataset]`
 
 ```toml
 [dataset]
-download_source = { Mirror = { url = "https://hf-mirror.com" } }
 size_gb = 1.0
 num_shards = 4
 cache_dir = "./cache"
@@ -129,13 +181,16 @@ percentage = 0.4
 split = "train"
 ```
 
-下载源类型 说明
-HuggingFace 从 HuggingFace Hub 下载
-Mirror { url } 使用镜像站
-CustomUrl { url } 自定义 URL
-Local 使用本地文件
+下载源类型：
 
-🧠 [model] — 模型架构
+| 类型 | 说明 |
+|------|------|
+| `HuggingFace` | 直接从 HuggingFace Hub 下载 |
+| `Mirror { url }` | 使用镜像站 |
+| `CustomUrl { url }` | 自定义 URL |
+| `Local` | 使用本地文件 |
+
+### 模型配置 `[model]`
 
 ```toml
 [model]
@@ -143,26 +198,20 @@ num_layers = 12
 hidden_dim = 768
 num_heads = 12
 max_position_embeddings = 512
+vocab_size = 32000
 attention = { GQA = { num_groups = 4 } }
 activation = "SwiGLU"
 position_encoding = "RoPE"
 normalization = "RMSNorm"
 ```
 
-注意力类型 说明
-MHA 标准多头注意力
-GQA { num_groups } 分组查询注意力
-MQA 多查询注意力
-SlidingWindow { window_size } 滑动窗口注意力
-GQAWithSlidingWindow { num_groups, window_size } 组合注意力
-FlashAttention Flash Attention
+支持的注意力类型：`MHA`、`GQA { num_groups }`、`MQA`、`SlidingWindow { window_size }`、`FlashAttention`。
 
-🎯 [training] — 训练参数
+### 训练配置 `[training]`
 
 ```toml
 [training]
 learning_rate = 3e-4
-min_learning_rate = 1e-5
 batch_size = 32
 micro_batch_size = 8
 num_steps = 10000
@@ -172,21 +221,19 @@ gradient_accumulation_steps = 4
 mixed_precision = "BF16"
 ema_decay = 0.999
 grad_clip = 1.0
-lr_scheduler = { Cosine = { min_lr = 1e-5 } }
-optimizer = { AdamW = { beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8 } }
+
+[training.lr_scheduler]
+type = "Cosine"
+min_lr = 1e-5
+
+[training.optimizer]
+type = "AdamW"
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1e-8
 ```
 
-🔤 [tokenizer] — 分词器
-
-```toml
-[tokenizer]
-algorithm = "BPE"
-vocab_size = 32000
-normalization = true
-add_prefix_space = false
-```
-
-💻 [hardware] — 硬件配置
+### 硬件配置 `[hardware]`
 
 ```toml
 [hardware]
@@ -197,29 +244,34 @@ use_tf32 = true
 memory_prealloc = false
 ```
 
-📝 [logging] — 日志配置
+---
 
-```toml
-[logging]
-level = "info"
-wandb_project = "my-llm-project"
-wandb_entity = "my-team"
-tensorboard_dir = "./logs/tensorboard"
-csv_log_path = "./logs/training.csv"
-```
+## 📐 预设模型规格
+
+| 预设 | 层数 | 隐藏维度 | 头数 | 词表大小 | 序列长度 |
+|------|------|----------|------|----------|----------|
+| tiny | 4 | 256 | 4 | 4,096 | 128 |
+| small | 8 | 512 | 8 | 8,192 | 256 |
+| base | 12 | 768 | 12 | 32,768 | 512 |
 
 ---
 
-📐 预设模型规格
+## 🧩 功能支持矩阵
 
-预设 层数 隐藏维度 注意力头数 词表大小 序列长度
-tiny 4 256 4 4,096 128
-small 8 512 8 8,192 256
-base 12 768 12 32,768 512
+| 组件 | 支持选项 |
+|------|----------|
+| 激活函数 | SwiGLU, GELU, ReLU, SiLU, GEGLU |
+| 位置编码 | RoPE, ALiBi, NoPE, Learned, Sinusoidal |
+| 归一化 | RMSNorm, LayerNorm, PreLayerNorm, PostLayerNorm |
+| 优化器 | AdamW, Adam, SGD, LAMB |
+| 学习率调度 | Linear, Cosine, CosineWithRestarts, Constant, OneCycle |
+| 混合精度 | FP16, BF16, FP8 |
+| 注意力机制 | MHA, GQA, MQA, SlidingWindow, FlashAttention |
+| 分词算法 | BPE, WordPiece, Unigram, SentencePiece |
 
 ---
 
-📁 输出结构
+## 📁 输出结构
 
 ```
 output/
@@ -241,24 +293,14 @@ output/
 └── training.db
 ```
 
----
-
-📥 数据预处理
-
-格式 处理方式
-Parquet 自动检测文本列 (text/content/data 等)
-JSONL 自动提取文本字段，支持嵌套结构
-CSV 自动检测文本列
-TXT 逐行处理
-
-处理流程： 读取源文件 → 提取文本 → 分词转 token ID → 按序列长度切分 → 保存预处理文件
+SQLite 数据库 (`training.db`) 记录完整训练指标、检查点信息和系统日志。
 
 ---
 
-🔄 从检查点恢复
+## 🔄 从检查点恢复
 
 ```bash
-shltechat train \
+shlteLLM train \
   -c config.toml \
   -o ./output \
   --resume ./output/checkpoints/checkpoint_step_500_loss_4.3210
@@ -268,33 +310,52 @@ shltechat train \
 
 ---
 
-🗃️ 数据库记录
+## 💬 聊天界面命令
 
-SQLite 数据库 (training.db) 记录以下完整信息：
+在 TUI 中使用 `/help` 查看可用命令：
 
-· 数据集下载状态
-· 预处理统计
-· 训练运行记录
-· 检查点信息
-· 训练指标（loss、学习率、梯度范数、吞吐量等）
-· 评估结果
-· 系统事件日志
-· 硬件信息
+| 命令 | 说明 |
+|------|------|
+| `/load <路径>` | 加载 GGUF 模型 |
+| `/ls [目录]` | 列出可用模型 |
+| `/info` | 显示模型信息 |
+| `/clear` | 清空对话历史 |
+| `/stop` | 停止当前生成 |
+| `/params <n> <t> <p> <r>` | 设置生成参数 |
+| `/save <路径>` | 保存对话历史 |
+| `/loadhist <路径>` | 加载对话历史 |
+| `/quit` | 退出程序 |
+
+键盘快捷键：
+
+| 按键 | 说明 |
+|------|------|
+| `i` | 进入插入模式 |
+| `Esc` | 退出插入模式 |
+| `j` / `k` | 向下 / 向上滚动 |
+| `g` / `G` | 滚动到顶部 / 底部 |
+| `q` | 退出 |
+| `c` | 停止生成 |
 
 ---
 
-🧩 架构支持矩阵
+## 🛠️ 构建选项
 
-组件 支持选项
-激活函数 SwiGLU, GELU, ReLU, SiLU, GEGLU
-位置编码 RoPE, ALiBi, NoPE, Learned, Sinusoidal
-归一化 RMSNorm, LayerNorm, PreLayerNorm, PostLayerNorm
-优化器 AdamW, Adam, SGD, LAMB
-学习率调度器 Linear, Cosine, CosineWithRestarts, Constant, OneCycle
-混合精度 FP16, BF16, FP8
+```bash
+# 默认构建（包含 Parquet/Arrow 支持）
+cargo build --release
+
+# 仅构建基础功能（不包含 Parquet/Arrow）
+cargo build --release --no-default-features
+
+# 启用 llama-cpp 后端（需要 libllama）
+cargo build --release --features llama-cpp
+```
 
 ---
 
-📜 许可证
+## 📜 许可证
 
 本项目基于 MIT License 开源。
+
+作者：QD·shlte

@@ -166,7 +166,7 @@ impl DataLoader {
     async fn download_from_custom_url(&self, url: &str, output_dir: &Path) -> Result<PathBuf> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
-            .user_agent("shlteLLM/3.0.0")
+            .user_agent("shlteLLM/3.2.2")
             .build()?;
 
         let response = client.get(url).send().await?;
@@ -197,7 +197,7 @@ impl DataLoader {
 
         if let Ok(response) = reqwest::Client::new()
             .get(&api_url)
-            .header("User-Agent", "shlteLLM/3.0.0")
+            .header("User-Agent", "shlteLLM/3.2.2")
             .send()
             .await
         {
@@ -413,7 +413,7 @@ impl DataLoader {
 
             if let Ok(response) = reqwest::Client::new()
                 .get(&api_url)
-                .header("User-Agent", "shlteLLM/3.0.0")
+                .header("User-Agent", "shlteLLM/3.2.2")
                 .send()
                 .await
             {
@@ -525,7 +525,7 @@ impl DataLoader {
     ) -> Result<PathBuf> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
-            .user_agent("shlteLLM/3.0.0")
+            .user_agent("shlteLLM/3.2.2")
             .build()?;
 
         let response = client.get(url).send().await?;
@@ -594,7 +594,7 @@ impl DataLoader {
     async fn stream_download_from_url(&self, url: &str, output_dir: &Path) -> Result<PathBuf> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3600))
-            .user_agent("shlteLLM/3.0.0")
+            .user_agent("shlteLLM/3.2.2")
             .build()?;
 
         let filename = url.split('/').next_back().unwrap_or("dataset.bin");
